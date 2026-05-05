@@ -1,6 +1,5 @@
 ﻿using Newtonsoft.Json;
 using ServerFpsProjectZero.Models;
-using ServerFpsProjectZero.Server;
 using ServerFpsProjectZero.Shared;
 using System;
 using System.Collections.Concurrent;
@@ -30,7 +29,7 @@ namespace ServerFpsProjectZero.Server
         private const int TICK_RATE = 20; // 20 ticks per second
         private const float TICK_TIME = 1f / TICK_RATE;
         private const int MATCHMAKING_INTERVAL = 2000; // 2 seconds
-        private const int PLAYERS_PER_GAME = 4; // 2v2
+        private const int PLAYERS_PER_GAME = 2; // 2v2
         private const float GAME_DURATION = 600f; // 10 minutes in seconds
 
         public GameServer()
@@ -103,7 +102,7 @@ namespace ServerFpsProjectZero.Server
                 string type = packet["type"].ToString();
 
                 // Find or create client connection
-                var client = clients.Values.FirstOrDefault(c => c.Endpoint.Equals(remoteEndpoint));
+                var client = clients.Values.FirstOrDefault(c => c.Endpoint?.Equals(remoteEndpoint) == true);
 
                 switch (type)
                 {
@@ -131,20 +130,23 @@ namespace ServerFpsProjectZero.Server
                     case "heartbeat":
                         HandleHeartbeat(jsonData, remoteEndpoint);
                         break;
-                    case "movement_input":
+                    case "movement":
                         HandleMovementInput(jsonData, remoteEndpoint);
                         break;
-                    case "shoot_input":
+                    case "shoot":
                         HandleShootInput(jsonData, remoteEndpoint);
                         break;
-                    case "ability_input":
+                    case "use_ability":
                         HandleAbilityInput(jsonData, remoteEndpoint);
                         break;
                     case "player_state":
                         HandlePlayerState(jsonData, remoteEndpoint);
                         break;
+                    case "player_death":
+                        HandlePlayerDeathPacket(jsonData, remoteEndpoint);
+                        break;
                     case "player_respawn":
-                        HandlePlayerRespawn(jsonData, remoteEndpoint);
+                        HandlePlayerRespawnPacket(jsonData, remoteEndpoint);
                         break;
                     case "weapon_pickup":
                         HandleWeaponPickup(jsonData, remoteEndpoint);
@@ -152,8 +154,8 @@ namespace ServerFpsProjectZero.Server
                     case "chat_message":
                         HandleChatMessage(jsonData, remoteEndpoint);
                         break;
-                    case "ping":
-                        HandlePing(jsonData, remoteEndpoint);
+                    case "ping_marker":
+                        HandlePingMarker(jsonData, remoteEndpoint);
                         break;
                 }
             }
@@ -192,6 +194,7 @@ namespace ServerFpsProjectZero.Server
                 response.token = client.SessionToken;
                 response.message = "Login successful";
                 response.timestamp = DateTime.UtcNow;
+                response.username = player.Username;
 
                 Console.WriteLine($"[Server] Player {player.Username} (ID: {player.PlayerId}) logged in");
             }
@@ -225,7 +228,7 @@ namespace ServerFpsProjectZero.Server
             else
             {
                 // Create new player (simulate database insert)
-                var newPlayer = new PlayerData
+                var newPlayer = new PlayerDatabaseModel
                 {
                     PlayerId = Interlocked.Increment(ref nextPlayerId),
                     Username = request.username,
@@ -237,7 +240,10 @@ namespace ServerFpsProjectZero.Server
                     MMR = 1200,
                     Rank = 3,
                     CreatedAt = DateTime.UtcNow,
-                    LastLogin = DateTime.UtcNow
+                    LastLogin = DateTime.UtcNow,
+                    Inventory = new PlayerInventory(),
+                    Loadout = new PlayerLoadout(),
+                    TotalStats = new PlayerStats()
                 };
 
                 SavePlayer(newPlayer);
@@ -272,7 +278,7 @@ namespace ServerFpsProjectZero.Server
                 return;
             }
 
-            var profileResponse = new ProfileDataPacket
+            var profileResponse = new ProfileDataWrapper
             {
                 type = "profile_data",
                 profile = new PlayerProfile
@@ -286,9 +292,9 @@ namespace ServerFpsProjectZero.Server
                     Gold = player.Gold,
                     MMR = player.MMR,
                     Rank = player.Rank,
-                    TotalStats = player.TotalStats,
-                    Inventory = player.Inventory,
-                    Loadout = player.Loadout,
+                    TotalStats = player.TotalStats ?? new PlayerStats(),
+                    Inventory = player.Inventory ?? new PlayerInventory(),
+                    Loadout = player.Loadout ?? new PlayerLoadout(),
                     TotalPlayTime = player.TotalPlayTime,
                     CreatedAt = player.CreatedAt,
                     LastLogin = player.LastLogin
@@ -325,7 +331,7 @@ namespace ServerFpsProjectZero.Server
             {
                 PlayerId = client.PlayerId,
                 Username = client.Username,
-                MMR = player.MMR,
+                MMR = player?.MMR ?? 1200,
                 JoinedAt = DateTime.UtcNow,
                 Endpoint = endpoint
             };
@@ -446,15 +452,21 @@ namespace ServerFpsProjectZero.Server
             for (int i = 0; i < players.Count; i++)
             {
                 var client = GetClientById(players[i].PlayerId);
-                if (i % 2 == 0)
-                    redTeam.Add(client);
-                else
-                    blueTeam.Add(client);
+                if (client != null)
+                {
+                    if (i % 2 == 0)
+                        redTeam.Add(client);
+                    else
+                        blueTeam.Add(client);
+                }
             }
 
             var gameRoom = new GameRoom
             {
                 GameId = gameId,
+                //todo: we should add this either randomly or from queue player should be able to queue a gametype
+                GameType = GameType.TeamDeathmatch,
+                MapName = Map.Office,
                 RedTeam = redTeam,
                 BlueTeam = blueTeam,
                 StartTime = DateTime.UtcNow,
@@ -474,6 +486,18 @@ namespace ServerFpsProjectZero.Server
                     Score = 0,
                     TeamId = redTeam.Contains(player) ? 0 : 1
                 };
+
+                gameRoom.PlayerPositions[player.PlayerId] = GetSpawnPosition(redTeam.Contains(player) ? 0 : 1, gameRoom);
+                gameRoom.PlayerStates[player.PlayerId] = new PlayerStateInfo
+                {
+                    health = 100,
+                    isAlive = true,
+                    currentAmmo = 30,
+                    isReloading = false,
+                    isCrouching = false,
+                    isSprinting = false,
+                    isAiming = false
+                };
             }
 
             activeGames.TryAdd(gameId, gameRoom);
@@ -485,17 +509,35 @@ namespace ServerFpsProjectZero.Server
                 player.InGame = true;
                 player.CurrentGameId = gameId;
                 player.TeamId = redTeam.Contains(player) ? 0 : 1;
+                player.IsDead = false;
 
                 var gameStartData = new GameStartData
                 {
                     type = "game_start",
+                    mapName = Map.Office,
+                    gameType = GameType.TeamDeathmatch,
                     gameId = gameId,
                     teamId = player.TeamId,
                     players = GetGamePlayerDataList(redTeam, blueTeam),
                     timestamp = DateTime.UtcNow
                 };
 
+                // Send spawn data
+                var spawnData = new PlayerSpawnData
+                {
+                    type = "player_spawn",
+                    playerId = player.PlayerId,
+                    username = player.Username,
+                    teamId = player.TeamId,
+                    position = GetSpawnPosition(player.TeamId, gameRoom),
+                    health = 100,
+                    loadout = GetPlayerById(player.PlayerId)?.Loadout ?? new PlayerLoadout(),
+                    timestamp = DateTime.UtcNow
+                };
+
                 SendPacket(gameStartData, player.Endpoint);
+                SendPacket(spawnData, player.Endpoint);
+
                 Console.WriteLine($"[Server] Game {gameId} started for {player.Username} on team {(player.TeamId == 0 ? "Red" : "Blue")}");
             }
 
@@ -555,7 +597,8 @@ namespace ServerFpsProjectZero.Server
                 if (!player.InGame)
                     continue;
 
-                var playerStats = game.PlayerStats[player.PlayerId];
+                var playerStats = game.PlayerStats.ContainsKey(player.PlayerId) ?
+                    game.PlayerStats[player.PlayerId] : new InGameStats();
 
                 var gameState = new GameStateData
                 {
@@ -585,7 +628,9 @@ namespace ServerFpsProjectZero.Server
             // Calculate results for each player
             foreach (var player in game.RedTeam.Concat(game.BlueTeam))
             {
-                var stats = game.PlayerStats[player.PlayerId];
+                var stats = game.PlayerStats.ContainsKey(player.PlayerId) ?
+                    game.PlayerStats[player.PlayerId] : new InGameStats();
+
                 bool isWinner = (player.TeamId == 0 && game.RedScore > game.BlueScore) ||
                                (player.TeamId == 1 && game.BlueScore > game.RedScore);
 
@@ -650,6 +695,7 @@ namespace ServerFpsProjectZero.Server
                 player.InGame = false;
                 player.CurrentGameId = -1;
                 player.TeamId = -1;
+                player.IsDead = false;
 
                 Console.WriteLine($"[Server] Game {game.GameId} ended for {player.Username}: {(isWinner ? "WINNER" : "LOSER")} - K/D: {stats.Kills}/{stats.Deaths}, Gold: +{goldReward}, XP: +{xpReward}");
             }
@@ -715,8 +761,15 @@ namespace ServerFpsProjectZero.Server
                 {
                     // Calculate damage
                     int damage = CalculateDamage(input.weaponId, distanceToTarget, false);
-                    bool isHeadshot = UnityEngine.Random.value < 0.1f; // 10% headshot chance (simplified)
+                    bool isHeadshot = new Random().NextDouble() < 0.1f; // 10% headshot chance
                     if (isHeadshot) damage *= 2;
+
+                    // Get target health
+                    var targetState = game.PlayerStates.ContainsKey(target.PlayerId) ?
+                        game.PlayerStates[target.PlayerId] : new PlayerStateInfo();
+
+                    targetState.health -= damage;
+                    game.PlayerStates[target.PlayerId] = targetState;
 
                     // Create hit data
                     var hitData = new HitData
@@ -731,38 +784,16 @@ namespace ServerFpsProjectZero.Server
                         hitPoint = targetPos,
                         hitNormal = new Vector3Data { x = 0, y = 1, z = 0 },
                         isHeadshot = isHeadshot,
-                        isKill = false,
+                        isKill = targetState.health <= 0,
                         timestamp = DateTime.UtcNow
                     };
 
-                    // Apply damage
-                    var targetStats = game.PlayerStats[target.PlayerId];
-                    var shooterStats = game.PlayerStats[client.PlayerId];
-
-                    // Check if target has health state
-                    int targetHealth = 100;
-                    if (game.PlayerStates.ContainsKey(target.PlayerId))
-                    {
-                        targetHealth = game.PlayerStates[target.PlayerId].health;
-                        targetHealth -= damage;
-                        game.PlayerStates[target.PlayerId].health = targetHealth;
-                    }
-                    else
-                    {
-                        targetHealth -= damage;
-                        game.PlayerStates[target.PlayerId] = new PlayerStateInfo
-                        {
-                            health = targetHealth,
-                            isAlive = targetHealth > 0
-                        };
-                    }
-
                     // Check for kill
-                    if (targetHealth <= 0)
+                    if (targetState.health <= 0)
                     {
-                        hitData.isKill = true;
+                        var targetStats = game.PlayerStats[target.PlayerId];
+                        var shooterStats = game.PlayerStats[client.PlayerId];
 
-                        // Update stats
                         targetStats.Deaths++;
                         shooterStats.Kills++;
                         shooterStats.Score += 100;
@@ -820,7 +851,6 @@ namespace ServerFpsProjectZero.Server
             }
         }
 
-
         private void HandleAbilityInput(string jsonData, IPEndPoint endpoint)
         {
             var input = JsonConvert.DeserializeObject<AbilityInput>(jsonData);
@@ -830,8 +860,33 @@ namespace ServerFpsProjectZero.Server
                 return;
 
             // Process ability logic
-            Console.WriteLine($"[Server] {client.Username} used ability: {input.abilityName}");
+            Console.WriteLine($"[Server] {client.Username} used ability: {input.abilityName} at position ({input.targetX}, {input.targetY}, {input.targetZ})");
+
+            // Broadcast ability use to nearby players
+            if (activeGames.TryGetValue(client.CurrentGameId, out var game))
+            {
+                var abilityData = new
+                {
+                    type = "ability_used",
+                    playerId = client.PlayerId,
+                    playerName = client.Username,
+                    abilityName = input.abilityName,
+                    targetX = input.targetX,
+                    targetY = input.targetY,
+                    targetZ = input.targetZ,
+                    timestamp = DateTime.UtcNow
+                };
+
+                foreach (var player in game.RedTeam.Concat(game.BlueTeam))
+                {
+                    if (player.PlayerId != client.PlayerId && player.InGame)
+                    {
+                        SendPacket(abilityData, player.Endpoint);
+                    }
+                }
+            }
         }
+
         private void HandlePlayerState(string jsonData, IPEndPoint endpoint)
         {
             var state = JsonConvert.DeserializeObject<PlayerStateData>(jsonData);
@@ -862,48 +917,42 @@ namespace ServerFpsProjectZero.Server
                     playerState.isSprinting = state.isSprinting;
                     playerState.isAiming = state.isAiming;
                 }
-
-                // Broadcast state to other players
-                foreach (var player in game.RedTeam.Concat(game.BlueTeam))
-                {
-                    if (player.PlayerId == client.PlayerId || !player.InGame)
-                        continue;
-
-                    var otherPlayerData = new OtherPlayerData
-                    {
-                        playerId = client.PlayerId,
-                        username = client.Username,
-                        teamId = client.TeamId,
-                        position = game.PlayerPositions[client.PlayerId],
-                        health = state.health,
-                        isAlive = state.health > 0
-                    };
-
-                    var stateUpdate = new
-                    {
-                        type = "player_state_update",
-                        player = otherPlayerData,
-                        timestamp = DateTime.UtcNow
-                    };
-
-                    SendPacket(stateUpdate, player.Endpoint);
-                }
             }
         }
 
-        private void HandlePlayerRespawn(string jsonData, IPEndPoint endpoint)
+        private void HandlePlayerDeathPacket(string jsonData, IPEndPoint endpoint)
         {
-            var respawn = JsonConvert.DeserializeObject<PlayerRespawnData>(jsonData);
-            var client = GetClientByToken(respawn.token);
+            var deathPacket = JsonConvert.DeserializeObject<dynamic>(jsonData);
+            string token = deathPacket.token;
+            int gameId = deathPacket.gameId;
+            int killerId = deathPacket.killerId;
+
+            var client = GetClientByToken(token);
 
             if (client == null || !client.InGame)
                 return;
 
-            if (activeGames.TryGetValue(client.CurrentGameId, out var game))
+            if (activeGames.TryGetValue(gameId, out var game))
+            {
+                HandlePlayerDeath(client, game);
+            }
+        }
+
+        private void HandlePlayerRespawnPacket(string jsonData, IPEndPoint endpoint)
+        {
+            var respawnPacket = JsonConvert.DeserializeObject<dynamic>(jsonData);
+            string token = respawnPacket.token;
+            int gameId = respawnPacket.gameId;
+
+            var client = GetClientByToken(token);
+
+            if (client == null || !client.InGame)
+                return;
+
+            if (activeGames.TryGetValue(gameId, out var game))
             {
                 // Get spawn position based on team
                 var spawnPos = GetSpawnPosition(client.TeamId, game);
-                respawn.spawnPosition = spawnPos;
 
                 // Reset player stats for respawn
                 if (game.PlayerStates.ContainsKey(client.PlayerId))
@@ -912,10 +961,12 @@ namespace ServerFpsProjectZero.Server
                     game.PlayerStates[client.PlayerId].isAlive = true;
                 }
 
+                client.IsDead = false;
+
                 // Notify all players about respawn
                 var spawnData = new PlayerSpawnData
                 {
-                    type = "player_spawned",
+                    type = "player_spawn",
                     playerId = client.PlayerId,
                     username = client.Username,
                     teamId = client.TeamId,
@@ -1007,7 +1058,7 @@ namespace ServerFpsProjectZero.Server
             }
         }
 
-        private void HandlePing(string jsonData, IPEndPoint endpoint)
+        private void HandlePingMarker(string jsonData, IPEndPoint endpoint)
         {
             var ping = JsonConvert.DeserializeObject<PingData>(jsonData);
             var client = GetClientByToken(ping.token);
@@ -1023,23 +1074,27 @@ namespace ServerFpsProjectZero.Server
                 var team = client.TeamId == 0 ? game.RedTeam : game.BlueTeam;
                 foreach (var teammate in team)
                 {
-                    if (teammate.InGame)
+                    if (teammate.InGame && teammate.PlayerId != client.PlayerId)
                     {
                         SendPacket(ping, teammate.Endpoint);
                     }
                 }
             }
         }
+
         private void HandlePlayerDeath(ClientConnection victim, GameRoom game)
         {
             // Mark player as dead
             victim.IsDead = true;
-            game.PlayerStates[victim.PlayerId].isAlive = false;
+            if (game.PlayerStates.ContainsKey(victim.PlayerId))
+            {
+                game.PlayerStates[victim.PlayerId].isAlive = false;
+            }
 
             // Notify victim
             var deathData = new
             {
-                type = "player_death",
+                type = "player_death_notification",
                 respawnTime = 5f,
                 timestamp = DateTime.UtcNow
             };
@@ -1053,33 +1108,33 @@ namespace ServerFpsProjectZero.Server
             {
                 1 => 25, // Assault Rifle
                 2 => 35, // Pistol
-                3 => 50, // Shotgun (close range)
+                3 => 20, // SMG
                 4 => 70, // Sniper
-                5 => 20, // SMG
+                5 => 15, // Shotgun (close range)
                 _ => 15
             };
 
             // Distance falloff
-            float falloff = Mathf.Clamp01(1f - (distance / 100f));
-            int finalDamage = Mathf.RoundToInt(baseDamage * (0.5f + falloff * 0.5f));
+            float falloff = Math.Clamp(1f - (distance / 100f), 0.3f, 1f);
+            int finalDamage = (int)(baseDamage * falloff);
 
             // Headshot multiplier
             if (isHeadshot)
                 finalDamage *= 2;
 
-            return finalDamage;
+            return Math.Max(1, finalDamage);
         }
 
         private Vector3Data GetSpawnPosition(int teamId, GameRoom game)
         {
             // Return predetermined spawn positions (in production, use map-specific spawn points)
-            if (teamId == 0)
+            if (teamId == 0) // Red team
             {
-                return new Vector3Data { x = -10f, y = 1f, z = 0f };
+                return new Vector3Data { x = -15f, y = 1f, z = 0f };
             }
-            else
+            else // Blue team
             {
-                return new Vector3Data { x = 10f, y = 1f, z = 0f };
+                return new Vector3Data { x = 15f, y = 1f, z = 0f };
             }
         }
 
@@ -1095,6 +1150,14 @@ namespace ServerFpsProjectZero.Server
             if (client != null)
             {
                 client.LastHeartbeat = DateTime.UtcNow;
+
+                // Send heartbeat response
+                var response = new
+                {
+                    type = "heartbeat_response",
+                    timestamp = DateTime.UtcNow
+                };
+                SendPacket(response, endpoint);
             }
         }
 
@@ -1111,9 +1174,38 @@ namespace ServerFpsProjectZero.Server
                     HandleLeaveQueue(jsonData, endpoint);
                 }
 
+                // Remove from game if in game
+                if (client.InGame && activeGames.TryGetValue(client.CurrentGameId, out var game))
+                {
+                    // Handle disconnection from game
+                    var disconnectData = new PlayerDespawnData
+                    {
+                        type = "player_despawn",
+                        playerId = client.PlayerId,
+                        reason = "disconnect",
+                        timestamp = DateTime.UtcNow
+                    };
+
+                    foreach (var player in game.RedTeam.Concat(game.BlueTeam))
+                    {
+                        if (player.InGame && player.PlayerId != client.PlayerId)
+                        {
+                            SendPacket(disconnectData, player.Endpoint);
+                        }
+                    }
+                }
+
                 clients.TryRemove(client.PlayerId, out _);
                 Console.WriteLine($"[Server] {client.Username} logged out");
             }
+
+            var response = new
+            {
+                type = "logout_response",
+                success = true,
+                timestamp = DateTime.UtcNow
+            };
+            SendPacket(response, endpoint);
         }
 
         private ClientConnection GetClientByToken(string token)
@@ -1156,11 +1248,11 @@ namespace ServerFpsProjectZero.Server
                 {
                     playerId = player.PlayerId,
                     username = player.Username,
-                    level = data.Level,
-                    mmr = data.MMR,
-                    rank = data.Rank,
+                    level = data?.Level ?? 1,
+                    mmr = data?.MMR ?? 1200,
+                    rank = data?.Rank ?? 3,
                     teamId = 0,
-                    loadout = data.Loadout ?? new PlayerLoadout()
+                    loadout = data?.Loadout ?? new PlayerLoadout()
                 });
             }
 
@@ -1171,11 +1263,11 @@ namespace ServerFpsProjectZero.Server
                 {
                     playerId = player.PlayerId,
                     username = player.Username,
-                    level = data.Level,
-                    mmr = data.MMR,
-                    rank = data.Rank,
+                    level = data?.Level ?? 1,
+                    mmr = data?.MMR ?? 1200,
+                    rank = data?.Rank ?? 3,
                     teamId = 1,
-                    loadout = data.Loadout ?? new PlayerLoadout()
+                    loadout = data?.Loadout ?? new PlayerLoadout()
                 });
             }
 
@@ -1191,6 +1283,9 @@ namespace ServerFpsProjectZero.Server
                 if (player.PlayerId == currentPlayerId)
                     continue;
 
+                var playerState = game.PlayerStates.ContainsKey(player.PlayerId) ?
+                    game.PlayerStates[player.PlayerId] : new PlayerStateInfo();
+
                 others.Add(new OtherPlayerData
                 {
                     playerId = player.PlayerId,
@@ -1198,8 +1293,8 @@ namespace ServerFpsProjectZero.Server
                     teamId = player.TeamId,
                     position = game.PlayerPositions.ContainsKey(player.PlayerId) ?
                                game.PlayerPositions[player.PlayerId] : new Vector3Data(),
-                    health = 100, // Simplified
-                    isAlive = true
+                    health = playerState.health,
+                    isAlive = playerState.isAlive
                 });
             }
 
@@ -1264,12 +1359,12 @@ namespace ServerFpsProjectZero.Server
 
         #region Database Simulation (Replace with actual database)
 
-        private ConcurrentDictionary<int, PlayerData> playerDatabase = new ConcurrentDictionary<int, PlayerData>();
+        private ConcurrentDictionary<int, PlayerDatabaseModel> playerDatabase = new ConcurrentDictionary<int, PlayerDatabaseModel>();
 
         private void LoadPlayerData()
         {
             // Add some test players
-            var testPlayer = new PlayerData
+            var testPlayer = new PlayerDatabaseModel
             {
                 PlayerId = 1000,
                 Username = "player1",
@@ -1277,7 +1372,7 @@ namespace ServerFpsProjectZero.Server
                 Email = "player1@test.com",
                 Level = 5,
                 Experience = 500,
-                Gold = 500,
+                Gold = 5000,
                 MMR = 1200,
                 Rank = 3,
                 TotalStats = new PlayerStats
@@ -1287,15 +1382,15 @@ namespace ServerFpsProjectZero.Server
                     TotalLosses = 20,
                     TotalKills = 250,
                     TotalDeaths = 150,
-                    //WinRate = 60f,
-                    //KDRatio = 1.666f
+                    WinRate = 60f,
+                    KDRatio = 1.666f
                 },
                 Inventory = new PlayerInventory
                 {
-                    OwnedWeapons = new List<int> { 1, 2, 3, 4, 5, 6 },
+                    OwnedWeapons = new List<int> { 1, 2, 3, 4, 5 },
                     OwnedSkins = new List<int> { 1, 2, 3 },
                     OwnedGrenades = new List<int> { 4, 5 },
-                    //LootBoxes = new List<object>()
+                    LootBoxes = new List<LootBox>()
                 },
                 Loadout = new PlayerLoadout
                 {
@@ -1313,18 +1408,18 @@ namespace ServerFpsProjectZero.Server
             playerDatabase.TryAdd(1000, testPlayer);
         }
 
-        private PlayerData GetPlayerByUsername(string username)
+        private PlayerDatabaseModel GetPlayerByUsername(string username)
         {
             return playerDatabase.Values.FirstOrDefault(p => p.Username == username);
         }
 
-        private PlayerData GetPlayerById(int playerId)
+        private PlayerDatabaseModel GetPlayerById(int playerId)
         {
             playerDatabase.TryGetValue(playerId, out var player);
             return player;
         }
 
-        private void SavePlayer(PlayerData player)
+        private void SavePlayer(PlayerDatabaseModel player)
         {
             playerDatabase.AddOrUpdate(player.PlayerId, player, (id, old) => player);
         }
@@ -1361,6 +1456,8 @@ namespace ServerFpsProjectZero.Server
     public class GameRoom
     {
         public int GameId { get; set; }
+        public Map MapName { get; set; }
+        public GameType GameType { get; set; }
         public List<ClientConnection> RedTeam { get; set; }
         public List<ClientConnection> BlueTeam { get; set; }
         public DateTime StartTime { get; set; }
@@ -1381,7 +1478,19 @@ namespace ServerFpsProjectZero.Server
         public int TeamId { get; set; }
     }
 
-    public class PlayerData
+    public class PlayerStateInfo
+    {
+        public int health = 100;
+        public bool isAlive = true;
+        public int currentAmmo = 30;
+        public bool isReloading = false;
+        public bool isCrouching = false;
+        public bool isSprinting = false;
+        public bool isAiming = false;
+    }
+
+    // Server-only database model
+    public class PlayerDatabaseModel
     {
         public int PlayerId { get; set; }
         public string Username { get; set; }
@@ -1400,98 +1509,5 @@ namespace ServerFpsProjectZero.Server
         public DateTime LastLogin { get; set; }
     }
 
-    // Request/Response classes
-    public class LoginRequest
-    {
-        public string type;
-        public string username;
-        public string password;
-        public DateTime timestamp;
-    }
-
-    public class RegisterRequest
-    {
-        public string type;
-        public string username;
-        public string password;
-        public string email;
-        public DateTime timestamp;
-    }
-
-    public class GetProfileRequest
-    {
-        public string type;
-        public string token;
-        public int playerId;
-    }
-
-    public class JoinQueueRequest
-    {
-        public string type;
-        public string token;
-    }
-
-    public class LeaveQueueRequest
-    {
-        public string type;
-        public string token;
-    }
-
-    public class GetQueueStatusRequest
-    {
-        public string type;
-        public string token;
-    }
-
-    public class LogoutRequest
-    {
-        public string type;
-        public string token;
-    }
-
-    public class HeartbeatPacket
-    {
-        public string type;
-        public string token;
-        public DateTime timestamp;
-    }
-
-    public class MovementInput
-    {
-        public string type;
-        public string token;
-        public float positionX;
-        public float positionY;
-        public float positionZ;
-        public float rotation;
-    }
-
-    public class ShootInput
-    {
-        public string type;
-        public string token;
-        public float targetX;
-        public float targetY;
-        public float targetZ;
-    }
-
-    public class AbilityInput
-    {
-        public string type;
-        public string token;
-        public string abilityName;
-    }
-    // Add this class inside GameServer or in a separate file
-    public class PlayerStateInfo
-    {
-        public int health = 100;
-        public bool isAlive = true;
-        public int currentAmmo = 30;
-        public bool isReloading = false;
-        public bool isCrouching = false;
-        public bool isSprinting = false;
-        public bool isAiming = false;
-    }
     #endregion
 }
-

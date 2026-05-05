@@ -258,6 +258,8 @@ namespace ServerFpsProjectZero.Shared
     public class GameStartData
     {
         public string type;
+        public Map mapName;
+        public GameType gameType;
         public int gameId;
         public int teamId;
         public List<GamePlayerData> players;
@@ -323,10 +325,12 @@ namespace ServerFpsProjectZero.Shared
     {
         public string type;
         public string token;
+        public int gameId;
         public float positionX;
         public float positionY;
         public float positionZ;
         public float rotation;
+        public DateTime timestamp;
     }
 
     [Serializable]
@@ -334,6 +338,7 @@ namespace ServerFpsProjectZero.Shared
     {
         public string type;
         public string token;
+        public int gameId;
         public float originX;
         public float originY;
         public float originZ;
@@ -341,6 +346,7 @@ namespace ServerFpsProjectZero.Shared
         public float targetY;
         public float targetZ;
         public int weaponId;
+        public DateTime timestamp;
     }
 
     [Serializable]
@@ -348,10 +354,91 @@ namespace ServerFpsProjectZero.Shared
     {
         public string type;
         public string token;
+        public int gameId;
         public string abilityName;
         public float targetX;
         public float targetY;
         public float targetZ;
+        public DateTime timestamp;
+    }
+
+    #endregion
+
+    #region Weapon Pickup Models
+
+    [Serializable]
+    public class WeaponData
+    {
+        public int weaponId;
+        public string weaponName;
+        public string weaponType;
+        public int damage;
+        public float fireRate;
+        public float range;
+        public int magazineSize;
+        public int maxAmmo;
+        public float reloadTime;
+        public string rarity;
+        public int price;
+    }
+
+    [Serializable]
+    public class WeaponPickupData
+    {
+        public string type;
+        public string token;
+        public int gameId;
+        public int weaponId;
+        public int ammoAmount;
+        public Vector3Data position;
+        public DateTime timestamp;
+    }
+
+    [Serializable]
+    public class WeaponPickupConfirm
+    {
+        public string type;
+        public int weaponId;
+        public int ammoAmount;
+        public bool success;
+        public string message;
+        public DateTime timestamp;
+    }
+
+    [Serializable]
+    public class WeaponDropData
+    {
+        public string type;
+        public string token;
+        public int gameId;
+        public int weaponId;
+        public int ammoAmount;
+        public Vector3Data position;
+        public DateTime timestamp;
+    }
+
+    [Serializable]
+    public class WeaponSpawnData
+    {
+        public string type;
+        public int weaponId;
+        public string weaponName;
+        public Vector3Data position;
+        public bool isActive;
+        public float respawnTime;
+        public DateTime timestamp;
+    }
+
+    [Serializable]
+    public class AmmoPickupData
+    {
+        public string type;
+        public string token;
+        public int gameId;
+        public int weaponId;
+        public int ammoAmount;
+        public Vector3Data position;
+        public DateTime timestamp;
     }
 
     #endregion
@@ -419,6 +506,7 @@ namespace ServerFpsProjectZero.Shared
     {
         public string type;
         public string token;
+        public int gameId;
         public int playerId;
         public float positionX;
         public float positionY;
@@ -485,6 +573,7 @@ namespace ServerFpsProjectZero.Shared
     {
         public string type;
         public string token;
+        public int gameId;
         public int playerId;
         public string username;
         public string message;
@@ -497,9 +586,32 @@ namespace ServerFpsProjectZero.Shared
     {
         public string type;
         public string token;
+        public int gameId;
         public int playerId;
         public string pingType;
         public Vector3Data position;
+        public DateTime timestamp;
+    }
+
+    [Serializable]
+    public class PlayerDeathData
+    {
+        public string type;
+        public string token;
+        public int gameId;
+        public int playerId;
+        public int killerId;
+        public DateTime timestamp;
+    }
+
+    [Serializable]
+    public class PlayerRespawnData
+    {
+        public string type;
+        public string token;
+        public int gameId;
+        public int playerId;
+        public Vector3Data spawnPosition;
         public DateTime timestamp;
     }
 
@@ -571,6 +683,34 @@ namespace ServerFpsProjectZero.Shared
         RightArm,
         LeftLeg,
         RightLeg
+    }
+
+    public enum WeaponType
+    {
+        AssaultRifle,
+        Pistol,
+        SMG,
+        Sniper,
+        Shotgun,
+        Melee,
+        Grenade
+    }
+
+    public enum WeaponRarity
+    {
+        Common,
+        Uncommon,
+        Rare,
+        Epic,
+        Legendary
+    }
+    public enum GameType
+    {
+        TeamDeathmatch,
+    }
+    public enum Map
+    {
+        Office
     }
 
     #endregion
