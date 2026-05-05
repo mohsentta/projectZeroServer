@@ -84,6 +84,37 @@ namespace ServerFpsProjectZero.Matchmaking
                 return true;
             }
         }
+        public int GetQueuePosition(int playerId)
+        {
+            lock (playerLookup)
+            {
+                if (!playerLookup.ContainsKey(playerId))
+                {
+                    return -1; // Player not in queue
+                }
+
+                // Convert queue to list to get position
+                var queueList = queue.ToList();
+
+                for (int i = 0; i < queueList.Count; i++)
+                {
+                    if (queueList[i].Player.PlayerId == playerId)
+                    {
+                        return i + 1; // Return 1-based position
+                    }
+                }
+
+                return -1; // Player not found in queue (shouldn't happen if in playerLookup)
+            }
+        }
+
+        public int GetQueuePosition(Player player)
+        {
+            if (player == null)
+                return -1;
+
+            return GetQueuePosition(player.PlayerId);
+        }
 
         public bool RemoveFromQueue(Player player)
         {

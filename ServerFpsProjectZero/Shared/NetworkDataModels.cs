@@ -326,9 +326,7 @@ namespace ServerFpsProjectZero.Shared
         public string type;
         public string token;
         public int gameId;
-        public float positionX;
-        public float positionY;
-        public float positionZ;
+        public Vector3Data position;
         public float rotation;
         public DateTime timestamp;
     }
@@ -508,9 +506,6 @@ namespace ServerFpsProjectZero.Shared
         public string token;
         public int gameId;
         public int playerId;
-        public float positionX;
-        public float positionY;
-        public float positionZ;
         public float rotation;
         public int health;
         public int currentAmmo;
