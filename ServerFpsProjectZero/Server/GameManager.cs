@@ -484,13 +484,16 @@ namespace ServerFpsProjectZero.Server
 
             if (activeGames.TryGetValue(client.CurrentGameId, out var game))
             {
-                if (input.position.x == 0)
-                    Console.WriteLine("HandleMovementInput is the issue");
                 game.PlayerPositions[client.PlayerId] = new Vector3Data
                 {
                     x = input.position.x,
                     y = input.position.y,
                     z = input.position.z
+                };
+                game.PlayerRotations[client.PlayerId] = new Vector2Data
+                {
+                    x = input.rotation.x,
+                    y = input.rotation.y
                 };
             }
         }
@@ -920,6 +923,9 @@ namespace ServerFpsProjectZero.Server
                     teamId = player.TeamId,
                     position = game.PlayerPositions.ContainsKey(player.PlayerId) ?
                                game.PlayerPositions[player.PlayerId] : new Vector3Data(),
+
+                    rotation = game.PlayerRotations.ContainsKey(player.PlayerId) ?
+                               game.PlayerRotations[player.PlayerId] : new Vector2Data(),
                     health = playerState.health,
                     isAlive = playerState.isAlive
                 });
@@ -985,6 +991,7 @@ namespace ServerFpsProjectZero.Server
         public bool IsActive { get; set; }
         public Dictionary<int, InGameStats> PlayerStats { get; set; } = new Dictionary<int, InGameStats>();
         public Dictionary<int, Vector3Data> PlayerPositions { get; set; } = new Dictionary<int, Vector3Data>();
+        public Dictionary<int, Vector2Data> PlayerRotations { get; set; } = new Dictionary<int, Vector2Data>();
         public Dictionary<int, PlayerStateInfo> PlayerStates { get; set; } = new Dictionary<int, PlayerStateInfo>();
     }
 

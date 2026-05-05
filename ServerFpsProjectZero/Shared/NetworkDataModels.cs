@@ -13,6 +13,12 @@ namespace ServerFpsProjectZero.Shared
         public float y;
         public float z;
     }
+    [Serializable]
+    public class Vector2Data
+    {
+        public float x;
+        public float y;
+    }
 
     [Serializable]
     public class PlayerLoadout
@@ -306,6 +312,7 @@ namespace ServerFpsProjectZero.Shared
         public string username;
         public int teamId;
         public Vector3Data position;
+        public Vector2Data rotation;
         public float health;
         public bool isAlive;
     }
@@ -327,7 +334,7 @@ namespace ServerFpsProjectZero.Shared
         public string token;
         public int gameId;
         public Vector3Data position;
-        public float rotation;
+        public Vector2Data rotation;
         public DateTime timestamp;
     }
 
