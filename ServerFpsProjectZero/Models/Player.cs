@@ -41,6 +41,7 @@ namespace ServerFpsProjectZero.Models
         public int Experience { get; set; }
         public int ExperienceToNextLevel { get; set; }
         public int Gold { get; set; }
+        public int Money { get; set; }
 
         // Equipment & Customization
         public PlayerLoadout Loadout { get; set; }
@@ -101,6 +102,7 @@ namespace ServerFpsProjectZero.Models
             Experience = 0;
             ExperienceToNextLevel = CalculateExperienceNeeded(2);
             Gold = 500;
+            Money = 500;
 
             // Initialize with default items
             Inventory = new PlayerInventory();

@@ -13,24 +13,19 @@ namespace ServerFpsProjectZero.Server
     {
         private ServerManager serverManager;
         private ConcurrentDictionary<int, GameRoom> activeGames;
-        private ConcurrentQueue<PlayerMatchmaking> matchmakingQueue;
         private int nextGameId = 1;
         private bool isRunning = false;
-        private Thread matchmakingThread;
         private Thread gameUpdateThread;
 
         // Configuration
         private const int TICK_RATE = 20;
         private const float TICK_TIME = 1f / TICK_RATE;
-        private const int MATCHMAKING_INTERVAL = 2000;
-        private const int PLAYERS_PER_GAME = 2;
         private const float GAME_DURATION = 600f;
 
         public GameManager(ServerManager serverManager)
         {
             this.serverManager = serverManager;
             activeGames = new ConcurrentDictionary<int, GameRoom>();
-            matchmakingQueue = new ConcurrentQueue<PlayerMatchmaking>();
 
             // Subscribe to game-related events only
             SubscribeToEvents();
@@ -40,23 +35,17 @@ namespace ServerFpsProjectZero.Server
         {
             isRunning = true;
 
-            matchmakingThread = new Thread(MatchmakingLoop);
-            matchmakingThread.IsBackground = true;
-            matchmakingThread.Start();
-
             gameUpdateThread = new Thread(GameUpdateLoop);
             gameUpdateThread.IsBackground = true;
             gameUpdateThread.Start();
 
             Console.WriteLine($"[GameManager] Started");
-            Console.WriteLine($"[GameManager] Players per game: {PLAYERS_PER_GAME}");
             Console.WriteLine($"[GameManager] Game duration: {GAME_DURATION} seconds");
         }
 
         public void Stop()
         {
             isRunning = false;
-            matchmakingThread?.Join(1000);
             gameUpdateThread?.Join(1000);
 
             // End all active games
@@ -73,9 +62,6 @@ namespace ServerFpsProjectZero.Server
 
         private void SubscribeToEvents()
         {
-            serverManager.OnJoinQueuePacket += HandleJoinQueue;
-            serverManager.OnLeaveQueuePacket += HandleLeaveQueue;
-            serverManager.OnGetQueueStatusPacket += HandleGetQueueStatus;
             serverManager.OnMovementPacket += HandleMovementInput;
             serverManager.OnShootPacket += HandleShootInput;
             serverManager.OnAbilityPacket += HandleAbilityInput;
@@ -89,175 +75,26 @@ namespace ServerFpsProjectZero.Server
 
         #endregion
 
-        #region Matchmaking Handlers
+        #region Public Game Creation Method
 
-        private void HandleJoinQueue(string jsonData, System.Net.IPEndPoint endpoint)
-        {
-            var request = JsonConvert.DeserializeObject<JoinQueueRequest>(jsonData);
-            var client = serverManager.GetClientByToken(request.token);
-
-            if (client == null)
-            {
-                serverManager.SendErrorResponse(endpoint, "Invalid session", 401);
-                return;
-            }
-
-            if (client.InQueue)
-            {
-                SendQueueResponse(client, false, "Already in queue");
-                return;
-            }
-
-            if (client.InGame)
-            {
-                SendQueueResponse(client, false, "Already in a game");
-                return;
-            }
-
-            var matchmakingPlayer = new PlayerMatchmaking
-            {
-                PlayerId = client.PlayerId,
-                Username = client.Username,
-                JoinedAt = DateTime.UtcNow,
-                Client = client
-            };
-
-            matchmakingQueue.Enqueue(matchmakingPlayer);
-            client.InQueue = true;
-            client.JoinedQueueAt = DateTime.UtcNow;
-
-            Console.WriteLine($"[GameManager] {client.Username} joined matchmaking queue. Queue size: {matchmakingQueue.Count}");
-            SendQueueResponse(client, true, "Joined queue");
-        }
-
-        private void HandleLeaveQueue(string jsonData, System.Net.IPEndPoint endpoint)
-        {
-            var request = JsonConvert.DeserializeObject<LeaveQueueRequest>(jsonData);
-            var client = serverManager.GetClientByToken(request.token);
-
-            if (client == null)
-            {
-                serverManager.SendErrorResponse(endpoint, "Invalid session", 401);
-                return;
-            }
-
-            if (!client.InQueue)
-            {
-                return;
-            }
-
-            RemoveFromQueue(client);
-            Console.WriteLine($"[GameManager] {client.Username} left matchmaking queue");
-            SendQueueResponse(client, true, "Left queue");
-        }
-
-        private void HandleGetQueueStatus(string jsonData, System.Net.IPEndPoint endpoint)
-        {
-            var request = JsonConvert.DeserializeObject<GetQueueStatusRequest>(jsonData);
-            var client = serverManager.GetClientByToken(request.token);
-
-            if (client == null)
-            {
-                serverManager.SendErrorResponse(endpoint, "Invalid session", 401);
-                return;
-            }
-
-            var queueStatus = new QueueStatusData
-            {
-                type = "queue_status",
-                queueSize = matchmakingQueue.Count,
-                position = GetQueuePosition(client.PlayerId),
-                estimatedWaitTime = CalculateEstimatedWaitTime(),
-                playersNeeded = PLAYERS_PER_GAME - (matchmakingQueue.Count % PLAYERS_PER_GAME),
-                inQueue = client.InQueue,
-                timestamp = DateTime.UtcNow
-            };
-
-            serverManager.SendPacket(queueStatus, endpoint);
-        }
-
-        private void RemoveFromQueue(ClientConnection client)
-        {
-            var tempList = new List<PlayerMatchmaking>();
-            while (matchmakingQueue.TryDequeue(out var queuedPlayer))
-            {
-                if (queuedPlayer.PlayerId != client.PlayerId)
-                {
-                    tempList.Add(queuedPlayer);
-                }
-            }
-
-            foreach (var player in tempList)
-            {
-                matchmakingQueue.Enqueue(player);
-            }
-
-            client.InQueue = false;
-        }
-
-        private void SendQueueResponse(ClientConnection client, bool success, string message)
-        {
-            var response = new QueueResponseData
-            {
-                type = "queue_response",
-                success = success,
-                message = message,
-                queueSize = matchmakingQueue.Count,
-                position = GetQueuePosition(client.PlayerId),
-                estimatedWaitTime = CalculateEstimatedWaitTime(),
-                playersNeeded = PLAYERS_PER_GAME - (matchmakingQueue.Count % PLAYERS_PER_GAME)
-            };
-            serverManager.SendPacket(response, client);
-        }
-
-        #endregion
-
-        #region Matchmaking Loop
-
-        private void MatchmakingLoop()
-        {
-            while (isRunning)
-            {
-                Thread.Sleep(MATCHMAKING_INTERVAL);
-
-                if (matchmakingQueue.Count >= PLAYERS_PER_GAME)
-                {
-                    var players = new List<PlayerMatchmaking>();
-                    int taken = 0;
-
-                    while (taken < PLAYERS_PER_GAME && matchmakingQueue.TryDequeue(out var player))
-                    {
-                        players.Add(player);
-                        taken++;
-                    }
-
-                    if (players.Count == PLAYERS_PER_GAME)
-                    {
-                        CreateGame(players);
-                    }
-                    else
-                    {
-                        foreach (var player in players)
-                        {
-                            matchmakingQueue.Enqueue(player);
-                        }
-                    }
-                }
-            }
-        }
-
-        private void CreateGame(List<PlayerMatchmaking> players)
+        public GameRoom CreateGame(List<Player> players, GameType gameType = GameType.TeamDeathmatch, Map mapName = Map.Office)
         {
             int gameId = Interlocked.Increment(ref nextGameId);
 
+            // Sort players by MMR for balanced teams
             players = players.OrderBy(p => p.MMR).ToList();
 
             var redTeam = new List<ClientConnection>();
             var blueTeam = new List<ClientConnection>();
+            var playerLookup = new Dictionary<int, Player>();
 
             for (int i = 0; i < players.Count; i++)
             {
-                var client = players[i].Client;
+                var player = players[i];
+                playerLookup[player.PlayerId] = player;
+
+                // Get or create client connection for each player
+                var client = serverManager.GetClientByToken(player.SessionToken);
                 if (client != null)
                 {
                     if (i % 2 == 0)
@@ -270,8 +107,8 @@ namespace ServerFpsProjectZero.Server
             var gameRoom = new GameRoom
             {
                 GameId = gameId,
-                GameType = GameType.TeamDeathmatch,
-                MapName = Map.Office,
+                GameType = gameType,
+                MapName = mapName,
                 RedTeam = redTeam,
                 BlueTeam = blueTeam,
                 StartTime = DateTime.UtcNow,
@@ -281,6 +118,7 @@ namespace ServerFpsProjectZero.Server
                 IsActive = true
             };
 
+            // Initialize player stats and states
             foreach (var player in redTeam.Concat(blueTeam))
             {
                 gameRoom.PlayerStats[player.PlayerId] = new InGameStats
@@ -291,7 +129,7 @@ namespace ServerFpsProjectZero.Server
                     TeamId = redTeam.Contains(player) ? 0 : 1
                 };
 
-                gameRoom.PlayerPositions[player.PlayerId] = GetSpawnPosition(redTeam.Contains(player) ? 0 : 1);
+                //gameRoom.PlayerPositions[player.PlayerId] = GetSpawnPosition(redTeam.Contains(player) ? 0 : 1);
                 gameRoom.PlayerStates[player.PlayerId] = new PlayerStateInfo
                 {
                     health = 100,
@@ -306,9 +144,9 @@ namespace ServerFpsProjectZero.Server
 
             activeGames.TryAdd(gameId, gameRoom);
 
+            // Notify all players about game start
             foreach (var player in redTeam.Concat(blueTeam))
             {
-                player.InQueue = false;
                 player.InGame = true;
                 player.CurrentGameId = gameId;
                 player.TeamId = redTeam.Contains(player) ? 0 : 1;
@@ -317,8 +155,8 @@ namespace ServerFpsProjectZero.Server
                 var gameStartData = new GameStartData
                 {
                     type = "game_start",
-                    mapName = Map.Office,
-                    gameType = GameType.TeamDeathmatch,
+                    mapName = mapName,
+                    gameType = gameType,
                     gameId = gameId,
                     teamId = player.TeamId,
                     players = GetGamePlayerDataList(redTeam, blueTeam),
@@ -343,6 +181,7 @@ namespace ServerFpsProjectZero.Server
             }
 
             Console.WriteLine($"[GameManager] Game {gameId} created! Red Team: {redTeam.Count}, Blue Team: {blueTeam.Count}");
+            return gameRoom;
         }
 
         #endregion
@@ -432,8 +271,8 @@ namespace ServerFpsProjectZero.Server
                 int goldReward = 100 + (stats.Kills * 10) + (isWinner ? 50 : 0);
                 int xpReward = 50 + (stats.Kills * 5) + (isWinner ? 25 : 0);
 
-                // Update player stats through LoginManager
-                //UpdatePlayerStats(player.PlayerId, stats, isWinner, goldReward, xpReward);
+                // Update player stats through server manager
+                serverManager.UpdatePlayerGameStats(player.PlayerId, stats.Kills, stats.Deaths, isWinner, goldReward, xpReward);
 
                 var result = new MatchResult
                 {
@@ -463,12 +302,6 @@ namespace ServerFpsProjectZero.Server
 
             activeGames.TryRemove(game.GameId, out _);
         }
-
-        //private void UpdatePlayerStats(int playerId, InGameStats stats, bool isWinner, int goldReward, int xpReward)
-        //{
-        //    // Delegate player stat updates to LoginManager
-        //    serverManager.UpdatePlayerGameStats(playerId, stats.Kills, stats.Deaths, isWinner, goldReward, xpReward);
-        //}
 
         #endregion
 
@@ -792,19 +625,6 @@ namespace ServerFpsProjectZero.Server
             serverManager.SendPacket(deathData, victim);
         }
 
-        private void HandlePlayerDisconnectFromGame(ClientConnection client, GameRoom game)
-        {
-            var disconnectData = new PlayerDespawnData
-            {
-                type = "player_despawn",
-                playerId = client.PlayerId,
-                reason = "disconnect",
-                timestamp = DateTime.UtcNow
-            };
-
-            BroadcastToGameExcept(game, client.PlayerId, disconnectData);
-        }
-
         #endregion
 
         #region Broadcast Helpers
@@ -859,24 +679,6 @@ namespace ServerFpsProjectZero.Server
             }
         }
 
-        private int GetQueuePosition(int playerId)
-        {
-            int position = 1;
-            foreach (var player in matchmakingQueue)
-            {
-                if (player.PlayerId == playerId)
-                    return position;
-                position++;
-            }
-            return 0;
-        }
-
-        private int CalculateEstimatedWaitTime()
-        {
-            int playersNeeded = PLAYERS_PER_GAME - (matchmakingQueue.Count % PLAYERS_PER_GAME);
-            return playersNeeded * 30;
-        }
-
         private List<GamePlayerData> GetGamePlayerDataList(List<ClientConnection> redTeam, List<ClientConnection> blueTeam)
         {
             var players = new List<GamePlayerData>();
@@ -923,7 +725,6 @@ namespace ServerFpsProjectZero.Server
                     teamId = player.TeamId,
                     position = game.PlayerPositions.ContainsKey(player.PlayerId) ?
                                game.PlayerPositions[player.PlayerId] : new Vector3Data(),
-
                     rotation = game.PlayerRotations.ContainsKey(player.PlayerId) ?
                                game.PlayerRotations[player.PlayerId] : new Vector2Data(),
                     health = playerState.health,
@@ -944,10 +745,46 @@ namespace ServerFpsProjectZero.Server
 
         #endregion
 
-        // Add to GameManager's public methods region
+        #region Public Methods
+
         public int GetActiveGameCount()
         {
             return activeGames.Count;
+        }
+
+        public GameRoom GetGameById(int gameId)
+        {
+            activeGames.TryGetValue(gameId, out GameRoom game);
+            return game;
+        }
+
+        public bool RemovePlayerFromGame(int playerId)
+        {
+            foreach (var game in activeGames.Values)
+            {
+                var player = game.RedTeam.FirstOrDefault(p => p.PlayerId == playerId) ??
+                            game.BlueTeam.FirstOrDefault(p => p.PlayerId == playerId);
+
+                if (player != null)
+                {
+                    player.InGame = false;
+                    player.CurrentGameId = -1;
+                    player.TeamId = -1;
+                    player.IsDead = false;
+
+                    var disconnectData = new PlayerDespawnData
+                    {
+                        type = "player_despawn",
+                        playerId = playerId,
+                        reason = "disconnect",
+                        timestamp = DateTime.UtcNow
+                    };
+                    BroadcastToGameExcept(game, playerId, disconnectData);
+
+                    return true;
+                }
+            }
+            return false;
         }
 
         public void PrintActiveGames()
@@ -964,18 +801,11 @@ namespace ServerFpsProjectZero.Server
                 Console.WriteLine();
             }
         }
+
+        #endregion
     }
 
     #region Game Data Models
-
-    public class PlayerMatchmaking
-    {
-        public int PlayerId { get; set; }
-        public string Username { get; set; }
-        public int MMR { get; set; }
-        public DateTime JoinedAt { get; set; }
-        public ClientConnection Client { get; set; }
-    }
 
     public class GameRoom
     {

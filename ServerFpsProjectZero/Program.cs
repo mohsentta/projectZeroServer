@@ -18,8 +18,8 @@ namespace ServerFpsProjectZero
             ServerManager serverManager = new ServerManager(serverPort);
 
             // Create managers
-            LoginManager loginManager = new LoginManager(serverManager);
             GameManager gameManager = new GameManager(serverManager);
+            LoginManager loginManager = new LoginManager(serverManager, gameManager);
 
             // Start server
             serverManager.Start();

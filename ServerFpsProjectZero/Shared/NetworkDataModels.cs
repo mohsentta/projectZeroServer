@@ -90,6 +90,7 @@ namespace ServerFpsProjectZero.Shared
         public int Experience { get; set; }
         public int ExperienceToNextLevel { get; set; }
         public int Gold { get; set; }
+        public int Money { get; set; }
         public int MMR { get; set; }
         public int Rank { get; set; }
         public PlayerStats TotalStats { get; set; }

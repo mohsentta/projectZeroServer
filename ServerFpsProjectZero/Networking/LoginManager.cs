@@ -17,6 +17,7 @@ namespace ServerFpsProjectZero.Networking
     public class LoginManager
     {
         private ServerManager serverManager;
+        private GameManager gameManager;
 
         // Store connected players
         private ConcurrentDictionary<int, Player> connectedPlayers;
@@ -36,9 +37,10 @@ namespace ServerFpsProjectZero.Networking
         public event Action<Player> OnPlayerDisconnected;
         public event Action<string, IPEndPoint> OnFailedLogin;
 
-        public LoginManager(ServerManager serverManager)
+        public LoginManager(ServerManager serverManager, GameManager _gameManager)
         {
             this.serverManager = serverManager;
+            gameManager = _gameManager;
 
             connectedPlayers = new ConcurrentDictionary<int, Player>();
             tokenToPlayer = new ConcurrentDictionary<string, Player>();
@@ -279,6 +281,7 @@ namespace ServerFpsProjectZero.Networking
                 Experience = profile.Experience,
                 ExperienceToNextLevel = profile.ExperienceToNextLevel,
                 Gold = profile.Gold,
+                Money = profile.Money,
                 Inventory = profile.Inventory ?? new PlayerInventory(),
                 Loadout = profile.Loadout ?? new PlayerLoadout(),
                 Stats = profile.TotalStats ?? new PlayerStats(),
@@ -649,7 +652,7 @@ namespace ServerFpsProjectZero.Networking
                         }).ToList(),
                         timestamp = DateTime.UtcNow
                     };
-
+                    gameManager.CreateGame(players, GameType.TeamDeathmatch, Map.Office);
                     serverManager.SendPacket(gameStartPacket, player.ClientEndpoint);
                 }
             }
