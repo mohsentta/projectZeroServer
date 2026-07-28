@@ -99,6 +99,13 @@ namespace ServerFpsProjectZero.Shared
         public TimeSpan TotalPlayTime { get; set; }
         public DateTime CreatedAt { get; set; }
         public DateTime LastLogin { get; set; }
+
+        public PlayerProfile()
+        {
+            TotalStats = new PlayerStats();
+            Inventory = new PlayerInventory();
+            Loadout = new PlayerLoadout();
+        }
     }
 
     [Serializable]
@@ -114,6 +121,52 @@ namespace ServerFpsProjectZero.Shared
         public int Score { get; set; }
         public PlayerLoadout Loadout { get; set; }
         public PlayerStats Stats { get; set; }
+
+        public PlayerData()
+        {
+            Loadout = new PlayerLoadout();
+            Stats = new PlayerStats();
+        }
+    }
+
+    #endregion
+
+    #region Friends System Models
+
+    [Serializable]
+    public class FriendData
+    {
+        public int FriendId { get; set; }
+        public string Username { get; set; }
+        public PlayerStatus Status { get; set; }
+        public int CurrentGameId { get; set; } // -1 if not in game
+        public DateTime FriendsSince { get; set; }
+    }
+
+    [Serializable]
+    public class FriendRequest
+    {
+        public int RequestId { get; set; }
+        public int FromPlayerId { get; set; }
+        public string FromUsername { get; set; }
+        public int ToPlayerId { get; set; }
+        public DateTime SentAt { get; set; }
+        public FriendRequestStatus Status { get; set; }
+    }
+
+    public enum PlayerStatus
+    {
+        Offline,
+        Online,
+        InGame,
+        InQueue
+    }
+
+    public enum FriendRequestStatus
+    {
+        Pending,
+        Accepted,
+        Declined
     }
 
     #endregion
@@ -254,6 +307,81 @@ namespace ServerFpsProjectZero.Shared
         public string type;
         public string message;
         public int errorCode;
+        public DateTime timestamp;
+    }
+
+    #endregion
+
+    #region Friend Request/Response Models
+
+    [Serializable]
+    public class GetFriendsRequest
+    {
+        public string type;
+        public string token;
+    }
+
+    [Serializable]
+    public class GetFriendsResponse
+    {
+        public string type;
+        public bool success;
+        public List<FriendData> friends;
+        public List<FriendRequest> pendingRequests;
+        public string message;
+    }
+
+    [Serializable]
+    public class SendFriendRequest
+    {
+        public string type;
+        public string token;
+        public int targetPlayerId;
+        public string targetUsername;
+    }
+
+    [Serializable]
+    public class RespondToFriendRequest
+    {
+        public string type;
+        public string token;
+        public int requestId;
+        public bool accept;
+    }
+
+    [Serializable]
+    public class RemoveFriendRequest
+    {
+        public string type;
+        public string token;
+        public int friendId;
+    }
+
+    [Serializable]
+    public class FriendStatusUpdate
+    {
+        public string type;
+        public int playerId;
+        public string username;
+        public PlayerStatus status;
+        public int currentGameId;
+        public DateTime timestamp;
+    }
+
+    [Serializable]
+    public class FriendResponse
+    {
+        public string type;
+        public bool success;
+        public string message;
+        public FriendData friend;
+    }
+
+    [Serializable]
+    public class FriendRequestNotification
+    {
+        public string type;
+        public FriendRequest request;
         public DateTime timestamp;
     }
 

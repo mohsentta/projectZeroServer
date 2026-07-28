@@ -13,13 +13,78 @@ namespace ServerFpsProjectZero
             Console.WriteLine("  FPS Game Server Starting...");
             Console.WriteLine("========================================\n");
 
+            // Database connection string
+            string connectionString = "Data Source=FPSGame.db;Mode=ReadWriteCreate;";
+
             // Create server manager (single UDP port)
             int serverPort = 7777;
             ServerManager serverManager = new ServerManager(serverPort);
 
             // Create managers
             GameManager gameManager = new GameManager(serverManager);
-            LoginManager loginManager = new LoginManager(serverManager, gameManager);
+            LoginManager loginManager = new LoginManager(serverManager, gameManager, connectionString);
+            FriendsManager friendsManager = new FriendsManager(connectionString, serverManager, loginManager);
+            gameManager.SetLoginManager(loginManager);
+
+            // Wire up friends-related packet handlers
+            serverManager.OnGetFriendsPacket += (json, endpoint) =>
+            {
+                try
+                {
+                    var request = Newtonsoft.Json.JsonConvert.DeserializeObject<Shared.GetFriendsRequest>(json);
+                    var response = friendsManager.GetFriends(request.token);
+                    serverManager.SendPacket(response, endpoint);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[Friends] Error processing get_friends: {ex.Message}");
+                }
+            };
+
+            serverManager.OnSendFriendRequestPacket += (json, endpoint) =>
+            {
+                try
+                {
+                    var request = Newtonsoft.Json.JsonConvert.DeserializeObject<Shared.SendFriendRequest>(json);
+                    var response = friendsManager.SendFriendRequest(request.token, request.targetPlayerId, request.targetUsername);
+                    serverManager.SendPacket(response, endpoint);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[Friends] Error processing send_friend_request: {ex.Message}");
+                }
+            };
+
+            serverManager.OnRespondFriendRequestPacket += (json, endpoint) =>
+            {
+                try
+                {
+                    var request = Newtonsoft.Json.JsonConvert.DeserializeObject<Shared.RespondToFriendRequest>(json);
+                    var response = friendsManager.RespondToFriendRequest(request.token, request.requestId, request.accept);
+                    serverManager.SendPacket(response, endpoint);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[Friends] Error processing respond_friend_request: {ex.Message}");
+                }
+            };
+
+            serverManager.OnRemoveFriendPacket += (json, endpoint) =>
+            {
+                try
+                {
+                    var request = Newtonsoft.Json.JsonConvert.DeserializeObject<Shared.RemoveFriendRequest>(json);
+                    var response = friendsManager.RemoveFriend(request.token, request.friendId);
+                    serverManager.SendPacket(response, endpoint);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[Friends] Error processing remove_friend: {ex.Message}");
+                }
+            };
+
+            // Connect LoginManager with FriendsManager for status updates
+            loginManager.SetFriendsManager(friendsManager);
 
             // Start server
             serverManager.Start();
@@ -33,6 +98,7 @@ namespace ServerFpsProjectZero
             Console.WriteLine("  'players' - Show active players");
             Console.WriteLine("  'clients' - Show connected clients");
             Console.WriteLine("  'games' - Show active games");
+            Console.WriteLine("  'friends' - Show friends statistics");
             Console.WriteLine("  'help' - Show this menu");
             Console.WriteLine("  'quit' - Shutdown server\n");
 
@@ -52,6 +118,9 @@ namespace ServerFpsProjectZero
                         break;
                     case "games":
                         gameManager.PrintActiveGames();
+                        break;
+                    case "friends":
+                        PrintFriendsStats(friendsManager);
                         break;
                     case "help":
                         PrintHelp();
@@ -84,9 +153,23 @@ namespace ServerFpsProjectZero
             Console.WriteLine("  'players' - Show active players and their details");
             Console.WriteLine("  'clients' - Show connected client connections");
             Console.WriteLine("  'games' - Show active game sessions");
+            Console.WriteLine("  'friends' - Show friends system statistics");
             Console.WriteLine("  'help' - Show this help menu");
             Console.WriteLine("  'quit' - Shutdown the server\n");
         }
 
+        static void PrintFriendsStats(FriendsManager friendsManager)
+        {
+            Console.WriteLine("\n[Friends System Statistics]");
+            Console.WriteLine("Friends system is active and handling:");
+            Console.WriteLine("  - Friend requests");
+            Console.WriteLine("  - Friends list management");
+            Console.WriteLine("  - Online status updates");
+            Console.WriteLine("  - Real-time friend notifications");
+
+            // You can add more detailed statistics here if you add methods to FriendsManager
+            // For example: total friendships, pending requests count, etc.
+            Console.WriteLine();
+        }
     }
 }

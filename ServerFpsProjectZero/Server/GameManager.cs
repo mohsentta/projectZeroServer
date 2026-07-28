@@ -1,5 +1,6 @@
 ﻿using Newtonsoft.Json;
 using ServerFpsProjectZero.Models;
+using ServerFpsProjectZero.Networking;
 using ServerFpsProjectZero.Shared;
 using System;
 using System.Collections.Concurrent;
@@ -12,6 +13,7 @@ namespace ServerFpsProjectZero.Server
     public class GameManager
     {
         private ServerManager serverManager;
+        private LoginManager loginManager;
         private ConcurrentDictionary<int, GameRoom> activeGames;
         private int nextGameId = 1;
         private bool isRunning = false;
@@ -29,6 +31,11 @@ namespace ServerFpsProjectZero.Server
 
             // Subscribe to game-related events only
             SubscribeToEvents();
+        }
+
+        public void SetLoginManager(LoginManager loginManager)
+        {
+            this.loginManager = loginManager;
         }
 
         public void Start()
@@ -265,6 +272,8 @@ namespace ServerFpsProjectZero.Server
                 var stats = game.PlayerStats.ContainsKey(player.PlayerId) ?
                     game.PlayerStats[player.PlayerId] : new InGameStats();
 
+
+
                 bool isWinner = (player.TeamId == 0 && game.RedScore > game.BlueScore) ||
                                (player.TeamId == 1 && game.BlueScore > game.RedScore);
 
@@ -291,6 +300,8 @@ namespace ServerFpsProjectZero.Server
                 };
 
                 serverManager.SendPacket(gameEndData, player);
+
+                loginManager?.UpdatePlayerStatusForFriends(player.PlayerId, PlayerStatus.Online);
 
                 player.InGame = false;
                 player.CurrentGameId = -1;

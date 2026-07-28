@@ -1,4 +1,5 @@
-﻿using Newtonsoft.Json;
+﻿using Microsoft.Data.Sqlite;
+using Newtonsoft.Json;
 using ServerFpsProjectZero.Matchmaking;
 using ServerFpsProjectZero.Models;
 using ServerFpsProjectZero.Server;
@@ -18,16 +19,14 @@ namespace ServerFpsProjectZero.Networking
     {
         private ServerManager serverManager;
         private GameManager gameManager;
+        private FriendsManager friendsManager;
 
         // Store connected players
         private ConcurrentDictionary<int, Player> connectedPlayers;
         private ConcurrentDictionary<string, Player> tokenToPlayer;
 
-        // Player database storage
-        private Dictionary<int, PlayerProfile> playerDatabase;
-        private Dictionary<string, int> usernameToId;
-        private Dictionary<string, int> emailToId;
-        private int nextPlayerId;
+        // SQLite connection string
+        private readonly string connectionString;
 
         // Matchmaking
         private MatchmakingQueue matchmakingQueue;
@@ -37,7 +36,7 @@ namespace ServerFpsProjectZero.Networking
         public event Action<Player> OnPlayerDisconnected;
         public event Action<string, IPEndPoint> OnFailedLogin;
 
-        public LoginManager(ServerManager serverManager, GameManager _gameManager)
+        public LoginManager(ServerManager serverManager, GameManager _gameManager, string _connectionString = "players.db")
         {
             this.serverManager = serverManager;
             gameManager = _gameManager;
@@ -45,11 +44,7 @@ namespace ServerFpsProjectZero.Networking
             connectedPlayers = new ConcurrentDictionary<int, Player>();
             tokenToPlayer = new ConcurrentDictionary<string, Player>();
 
-            // Initialize player database
-            playerDatabase = new Dictionary<int, PlayerProfile>();
-            usernameToId = new Dictionary<string, int>();
-            emailToId = new Dictionary<string, int>();
-            nextPlayerId = 1000;
+            connectionString = _connectionString;
 
             // Initialize matchmaking
             matchmakingQueue = new MatchmakingQueue();
@@ -73,13 +68,20 @@ namespace ServerFpsProjectZero.Networking
             serverManager.OnClientDisconnected += HandleClientDisconnected;
             serverManager.OnPlayerGameStatsUpdate += UpdatePlayerGameStats;
 
-            // Create test accounts
+            // Initialize database and create test accounts
+            InitializeDatabase();
             InitializeTestPlayers();
+        }
+
+        public void SetFriendsManager(FriendsManager manager)
+        {
+            this.friendsManager = manager;
         }
 
         public void Start()
         {
-            Console.WriteLine($"[LoginManager] Player database ready with {playerDatabase.Count} players");
+            var playerCount = GetPlayerCount();
+            Console.WriteLine($"[LoginManager] Player database ready with {playerCount} players");
             Console.WriteLine($"[LoginManager] Matchmaking queue active (requires {MatchmakingQueue.PLAYERS_PER_GAME} players per game)");
         }
 
@@ -100,10 +102,114 @@ namespace ServerFpsProjectZero.Networking
             Console.WriteLine("[LoginManager] Stopped");
         }
 
+        #region Database Initialization
+
+        private void InitializeDatabase()
+        {
+            using (var connection = new SqliteConnection(connectionString))
+            {
+                connection.Open();
+
+                var command = connection.CreateCommand();
+
+                // Drop existing tables in reverse dependency order so schema is always fresh
+                command.CommandText = "DROP TABLE IF EXISTS PlayerLoadout";
+                command.ExecuteNonQuery();
+                command.CommandText = "DROP TABLE IF EXISTS PlayerInventory";
+                command.ExecuteNonQuery();
+                command.CommandText = "DROP TABLE IF EXISTS Players";
+                command.ExecuteNonQuery();
+
+                // Create players table
+                command.CommandText = @"
+                    CREATE TABLE IF NOT EXISTS Players (
+                        PlayerId INTEGER PRIMARY KEY,
+                        Username TEXT UNIQUE NOT NULL,
+                        Email TEXT UNIQUE NOT NULL,
+                        PasswordHash TEXT NOT NULL,
+                        Salt TEXT NOT NULL,
+                        Level INTEGER DEFAULT 1,
+                        Experience INTEGER DEFAULT 0,
+                        ExperienceToNextLevel INTEGER DEFAULT 150,
+                        Gold INTEGER DEFAULT 500,
+                        Money REAL DEFAULT 0.0,
+                        MMR INTEGER DEFAULT 1000,
+                        Rank INTEGER DEFAULT 1,
+                        TotalMatches INTEGER DEFAULT 0,
+                        TotalWins INTEGER DEFAULT 0,
+                        TotalLosses INTEGER DEFAULT 0,
+                        TotalKills INTEGER DEFAULT 0,
+                        TotalDeaths INTEGER DEFAULT 0,
+                        TotalHeadshots INTEGER DEFAULT 0,
+                        TotalAssists INTEGER DEFAULT 0,
+                        WinRate REAL DEFAULT 0.0,
+                        KDRatio REAL DEFAULT 0.0,
+                        TotalPlayTimeTicks BIGINT DEFAULT 0,
+                        CreatedAt TEXT NOT NULL,
+                        LastLogin TEXT NOT NULL
+                    )";
+                command.ExecuteNonQuery();
+
+                // Create inventory table
+                command.CommandText = @"
+                    CREATE TABLE IF NOT EXISTS PlayerInventory (
+                        PlayerId INTEGER PRIMARY KEY,
+                        OwnedWeapons TEXT DEFAULT '[]',
+                        OwnedSkins TEXT DEFAULT '[]',
+                        OwnedGrenades TEXT DEFAULT '[]',
+                        LootBoxes TEXT DEFAULT '[]',
+                        FOREIGN KEY (PlayerId) REFERENCES Players(PlayerId)
+                    )";
+                command.ExecuteNonQuery();
+
+                // Create loadout table
+                command.CommandText = @"
+                    CREATE TABLE IF NOT EXISTS PlayerLoadout (
+                        PlayerId INTEGER PRIMARY KEY,
+                        PrimaryWeaponId INTEGER DEFAULT 1,
+                        SecondaryWeaponId INTEGER DEFAULT 2,
+                        MeleeWeaponId INTEGER DEFAULT 3,
+                        GrenadeId INTEGER DEFAULT 4,
+                        PlayerSkinId INTEGER DEFAULT 1,
+                        WeaponSkinId INTEGER DEFAULT 1,
+                        FOREIGN KEY (PlayerId) REFERENCES Players(PlayerId)
+                    )";
+                command.ExecuteNonQuery();
+
+                // Create indices
+                command.CommandText = "CREATE INDEX IF NOT EXISTS idx_players_username ON Players(Username)";
+                command.ExecuteNonQuery();
+                command.CommandText = "CREATE INDEX IF NOT EXISTS idx_players_email ON Players(Email)";
+                command.ExecuteNonQuery();
+                command.CommandText = "CREATE INDEX IF NOT EXISTS idx_players_mmr ON Players(MMR)";
+                command.ExecuteNonQuery();
+
+                Console.WriteLine("[Database] SQLite database initialized successfully");
+            }
+        }
+
+        private int GetPlayerCount()
+        {
+            using (var connection = new SqliteConnection(connectionString))
+            {
+                connection.Open();
+                var command = connection.CreateCommand();
+                command.CommandText = "SELECT COUNT(*) FROM Players";
+                return Convert.ToInt32(command.ExecuteScalar());
+            }
+        }
+
+        #endregion
+
         #region Test Player Initialization
 
         private void InitializeTestPlayers()
         {
+            var playerCount = GetPlayerCount();
+
+            // Only create test players if database is empty
+            if (playerCount > 0) return;
+
             CreateTestPlayer("player1", "player1@test.com", "password123", 1200, 500, 5);
             CreateTestPlayer("player2", "player2@test.com", "password123", 1350, 750, 8);
             CreateTestPlayer("player3", "player3@test.com", "password123", 1100, 300, 3);
@@ -123,79 +229,123 @@ namespace ServerFpsProjectZero.Networking
             string salt = GenerateSalt();
             string passwordHash = HashPassword(password, salt);
 
-            var playerProfile = new PlayerProfile
+            using (var connection = new SqliteConnection(connectionString))
             {
-                PlayerId = nextPlayerId,
-                Username = username,
-                Email = email,
-                Level = level,
-                Experience = level * 100,
-                ExperienceToNextLevel = CalculateExpToNextLevel(level),
-                Gold = gold,
-                MMR = mmr,
-                Rank = CalculateRankFromMMR(mmr),
-                TotalStats = new PlayerStats
+                connection.Open();
+                using (var transaction = connection.BeginTransaction())
                 {
-                    TotalMatches = level * 10,
-                    TotalWins = level * 6,
-                    TotalLosses = level * 4,
-                    TotalKills = level * 50,
-                    TotalDeaths = level * 30,
-                    TotalHeadshots = level * 15,
-                    TotalAssists = level * 20,
-                    WinRate = 60f,
-                    KDRatio = 1.666f
-                },
-                Inventory = new PlayerInventory
-                {
-                    OwnedWeapons = new List<int> { 1, 2, 3, 4, 5, 6 },
-                    OwnedSkins = new List<int> { 1, 2, 3 },
-                    OwnedGrenades = new List<int> { 4, 5 },
-                    LootBoxes = new List<LootBox>()
-                },
-                Loadout = new PlayerLoadout
-                {
-                    PrimaryWeaponId = 1,
-                    SecondaryWeaponId = 2,
-                    MeleeWeaponId = 3,
-                    GrenadeId = 4,
-                    PlayerSkinId = 1,
-                    WeaponSkinId = 1
-                },
-                TotalPlayTime = TimeSpan.FromHours(level * 5),
-                CreatedAt = DateTime.UtcNow.AddDays(-level * 7),
-                LastLogin = DateTime.UtcNow.AddDays(-1)
-            };
+                    var command = connection.CreateCommand();
+                    command.Transaction = transaction;
 
-            playerDatabase[nextPlayerId] = playerProfile;
-            usernameToId[username.ToLower()] = nextPlayerId;
-            emailToId[email.ToLower()] = nextPlayerId;
-            nextPlayerId++;
+                    // Insert player
+                    command.CommandText = @"
+                        INSERT INTO Players (
+                            Username, Email, PasswordHash, Salt, Level, Experience, 
+                            ExperienceToNextLevel, Gold, MMR, Rank,
+                            TotalMatches, TotalWins, TotalLosses, TotalKills, TotalDeaths,
+                            TotalHeadshots, TotalAssists, WinRate, KDRatio,
+                            TotalPlayTimeTicks, CreatedAt, LastLogin
+                        ) VALUES (
+                            @Username, @Email, @PasswordHash, @Salt, @Level, @Experience,
+                            @ExperienceToNextLevel, @Gold, @MMR, @Rank,
+                            @TotalMatches, @TotalWins, @TotalLosses, @TotalKills, @TotalDeaths,
+                            @TotalHeadshots, @TotalAssists, @WinRate, @KDRatio,
+                            @TotalPlayTimeTicks, @CreatedAt, @LastLogin
+                        )";
+
+                    command.Parameters.AddWithValue("@Username", username);
+                    command.Parameters.AddWithValue("@Email", email);
+                    command.Parameters.AddWithValue("@PasswordHash", passwordHash);
+                    command.Parameters.AddWithValue("@Salt", salt);
+                    command.Parameters.AddWithValue("@Level", level);
+                    command.Parameters.AddWithValue("@Experience", level * 100);
+                    command.Parameters.AddWithValue("@ExperienceToNextLevel", CalculateExpToNextLevel(level));
+                    command.Parameters.AddWithValue("@Gold", gold);
+                    command.Parameters.AddWithValue("@MMR", mmr);
+                    command.Parameters.AddWithValue("@Rank", CalculateRankFromMMR(mmr));
+                    command.Parameters.AddWithValue("@TotalMatches", level * 10);
+                    command.Parameters.AddWithValue("@TotalWins", level * 6);
+                    command.Parameters.AddWithValue("@TotalLosses", level * 4);
+                    command.Parameters.AddWithValue("@TotalKills", level * 50);
+                    command.Parameters.AddWithValue("@TotalDeaths", level * 30);
+                    command.Parameters.AddWithValue("@TotalHeadshots", level * 15);
+                    command.Parameters.AddWithValue("@TotalAssists", level * 20);
+                    command.Parameters.AddWithValue("@WinRate", 60.0);
+                    command.Parameters.AddWithValue("@KDRatio", 1.666);
+                    command.Parameters.AddWithValue("@TotalPlayTimeTicks", TimeSpan.FromHours(level * 5).Ticks);
+                    command.Parameters.AddWithValue("@CreatedAt", DateTime.UtcNow.AddDays(-level * 7).ToString("o"));
+                    command.Parameters.AddWithValue("@LastLogin", DateTime.UtcNow.AddDays(-1).ToString("o"));
+                    command.ExecuteNonQuery();
+
+                    // Get the auto-generated PlayerId
+                    command.CommandText = "SELECT last_insert_rowid()";
+                    var playerId = Convert.ToInt32(command.ExecuteScalar());
+
+                    // Insert inventory
+                    command.CommandText = @"
+                        INSERT INTO PlayerInventory (PlayerId, OwnedWeapons, OwnedSkins, OwnedGrenades, LootBoxes)
+                        VALUES (@PlayerId, @OwnedWeapons, @OwnedSkins, @OwnedGrenades, @LootBoxes)";
+                    command.Parameters.AddWithValue("@PlayerId", playerId);
+                    command.Parameters.AddWithValue("@OwnedWeapons", "[1,2,3,4,5,6]");
+                    command.Parameters.AddWithValue("@OwnedSkins", "[1,2,3]");
+                    command.Parameters.AddWithValue("@OwnedGrenades", "[4,5]");
+                    command.Parameters.AddWithValue("@LootBoxes", "[]");
+                    command.ExecuteNonQuery();
+
+                    // Insert loadout
+                    command.CommandText = @"
+                        INSERT INTO PlayerLoadout (PlayerId)
+                        VALUES (@PlayerId)";
+                    command.Parameters.Clear();
+                    command.Parameters.AddWithValue("@PlayerId", playerId);
+                    command.ExecuteNonQuery();
+
+                    transaction.Commit();
+                }
+            }
         }
 
         private int CreateNewPlayer(string username, string email, string passwordHash, string salt)
         {
-            var player = new Player(nextPlayerId, username, email, passwordHash)
+            using (var connection = new SqliteConnection(connectionString))
             {
-                MMR = 1000,
-                Rank = 1,
-                Gold = 500,
-                Level = 1,
-                Experience = 0,
-                ExperienceToNextLevel = CalculateExpToNextLevel(1),
-                CreatedAt = DateTime.UtcNow,
-                LastLogin = DateTime.UtcNow
-            };
+                connection.Open();
+                using (var transaction = connection.BeginTransaction())
+                {
+                    var command = connection.CreateCommand();
+                    command.Transaction = transaction;
 
-            var playerProfile = player.GetFullProfile();
-            playerDatabase[nextPlayerId] = playerProfile;
-            usernameToId[username.ToLower()] = nextPlayerId;
-            emailToId[email.ToLower()] = nextPlayerId;
+                    command.CommandText = @"
+                        INSERT INTO Players (
+                            Username, Email, PasswordHash, Salt, CreatedAt, LastLogin
+                        ) VALUES (
+                            @Username, @Email, @PasswordHash, @Salt, @CreatedAt, @LastLogin
+                        )";
 
-            int newId = nextPlayerId;
-            nextPlayerId++;
+                    command.Parameters.AddWithValue("@Username", username);
+                    command.Parameters.AddWithValue("@Email", email);
+                    command.Parameters.AddWithValue("@PasswordHash", passwordHash);
+                    command.Parameters.AddWithValue("@Salt", salt);
+                    command.Parameters.AddWithValue("@CreatedAt", DateTime.UtcNow.ToString("o"));
+                    command.Parameters.AddWithValue("@LastLogin", DateTime.UtcNow.ToString("o"));
+                    command.ExecuteNonQuery();
 
-            return newId;
+                    // Get the new PlayerId
+                    command.CommandText = "SELECT last_insert_rowid()";
+                    int newPlayerId = Convert.ToInt32(command.ExecuteScalar());
+
+                    // Create inventory and loadout entries
+                    command.CommandText = "INSERT INTO PlayerInventory (PlayerId) VALUES (@PlayerId)";
+                    command.Parameters.AddWithValue("@PlayerId", newPlayerId);
+                    command.ExecuteNonQuery();
+
+                    command.CommandText = "INSERT INTO PlayerLoadout (PlayerId) VALUES (@PlayerId)";
+                    command.ExecuteNonQuery();
+
+                    transaction.Commit();
+                    return newPlayerId;
+                }
+            }
         }
 
         private int CalculateRankFromMMR(int mmr)
@@ -214,6 +364,219 @@ namespace ServerFpsProjectZero.Networking
 
         #endregion
 
+        #region Database Operations
+
+        private PlayerProfile GetPlayerProfileFromDb(string username)
+        {
+            using (var connection = new SqliteConnection(connectionString))
+            {
+                connection.Open();
+                var command = connection.CreateCommand();
+                command.CommandText = @"
+                    SELECT p.*, i.OwnedWeapons, i.OwnedSkins, i.OwnedGrenades, i.LootBoxes,
+                           l.PrimaryWeaponId, l.SecondaryWeaponId, l.MeleeWeaponId, l.GrenadeId, 
+                           l.PlayerSkinId, l.WeaponSkinId
+                    FROM Players p
+                    LEFT JOIN PlayerInventory i ON p.PlayerId = i.PlayerId
+                    LEFT JOIN PlayerLoadout l ON p.PlayerId = l.PlayerId
+                    WHERE LOWER(p.Username) = LOWER(@Username)";
+                command.Parameters.AddWithValue("@Username", username);
+
+                using (var reader = command.ExecuteReader())
+                {
+                    if (reader.Read())
+                    {
+                        return MapReaderToPlayerProfile(reader);
+                    }
+                }
+            }
+            return null;
+        }
+
+        private PlayerProfile GetPlayerProfileFromDbById(int playerId)
+        {
+            using (var connection = new SqliteConnection(connectionString))
+            {
+                connection.Open();
+                var command = connection.CreateCommand();
+                command.CommandText = @"
+                    SELECT p.*, i.OwnedWeapons, i.OwnedSkins, i.OwnedGrenades, i.LootBoxes,
+                           l.PrimaryWeaponId, l.SecondaryWeaponId, l.MeleeWeaponId, l.GrenadeId, 
+                           l.PlayerSkinId, l.WeaponSkinId
+                    FROM Players p
+                    LEFT JOIN PlayerInventory i ON p.PlayerId = i.PlayerId
+                    LEFT JOIN PlayerLoadout l ON p.PlayerId = l.PlayerId
+                    WHERE p.PlayerId = @PlayerId";
+                command.Parameters.AddWithValue("@PlayerId", playerId);
+
+                using (var reader = command.ExecuteReader())
+                {
+                    if (reader.Read())
+                    {
+                        return MapReaderToPlayerProfile(reader);
+                    }
+                }
+            }
+            return null;
+        }
+
+        private PlayerProfile MapReaderToPlayerProfile(SqliteDataReader reader)
+        {
+            return new PlayerProfile
+            {
+                PlayerId = reader.GetInt32(reader.GetOrdinal("PlayerId")),
+                Username = reader.GetString(reader.GetOrdinal("Username")),
+                Email = reader.GetString(reader.GetOrdinal("Email")),
+                Level = reader.GetInt32(reader.GetOrdinal("Level")),
+                Experience = reader.GetInt32(reader.GetOrdinal("Experience")),
+                ExperienceToNextLevel = reader.GetInt32(reader.GetOrdinal("ExperienceToNextLevel")),
+                Gold = reader.GetInt32(reader.GetOrdinal("Gold")),
+                Money = (int)reader.GetDouble(reader.GetOrdinal("Money")),
+                MMR = reader.GetInt32(reader.GetOrdinal("MMR")),
+                Rank = reader.GetInt32(reader.GetOrdinal("Rank")),
+                TotalStats = new PlayerStats
+                {
+                    TotalMatches = reader.GetInt32(reader.GetOrdinal("TotalMatches")),
+                    TotalWins = reader.GetInt32(reader.GetOrdinal("TotalWins")),
+                    TotalLosses = reader.GetInt32(reader.GetOrdinal("TotalLosses")),
+                    TotalKills = reader.GetInt32(reader.GetOrdinal("TotalKills")),
+                    TotalDeaths = reader.GetInt32(reader.GetOrdinal("TotalDeaths")),
+                    TotalHeadshots = reader.GetInt32(reader.GetOrdinal("TotalHeadshots")),
+                    TotalAssists = reader.GetInt32(reader.GetOrdinal("TotalAssists")),
+                    WinRate = (float)reader.GetDouble(reader.GetOrdinal("WinRate")),
+                    KDRatio = (float)reader.GetDouble(reader.GetOrdinal("KDRatio"))
+                },
+                Inventory = new PlayerInventory
+                {
+                    OwnedWeapons = JsonConvert.DeserializeObject<List<int>>(reader.GetString(reader.GetOrdinal("OwnedWeapons"))),
+                    OwnedSkins = JsonConvert.DeserializeObject<List<int>>(reader.GetString(reader.GetOrdinal("OwnedSkins"))),
+                    OwnedGrenades = JsonConvert.DeserializeObject<List<int>>(reader.GetString(reader.GetOrdinal("OwnedGrenades"))),
+                    LootBoxes = JsonConvert.DeserializeObject<List<LootBox>>(reader.GetString(reader.GetOrdinal("LootBoxes")))
+                },
+                Loadout = new PlayerLoadout
+                {
+                    PrimaryWeaponId = reader.GetInt32(reader.GetOrdinal("PrimaryWeaponId")),
+                    SecondaryWeaponId = reader.GetInt32(reader.GetOrdinal("SecondaryWeaponId")),
+                    MeleeWeaponId = reader.GetInt32(reader.GetOrdinal("MeleeWeaponId")),
+                    GrenadeId = reader.GetInt32(reader.GetOrdinal("GrenadeId")),
+                    PlayerSkinId = reader.GetInt32(reader.GetOrdinal("PlayerSkinId")),
+                    WeaponSkinId = reader.GetInt32(reader.GetOrdinal("WeaponSkinId"))
+                },
+                TotalPlayTime = TimeSpan.FromTicks(reader.GetInt64(reader.GetOrdinal("TotalPlayTimeTicks"))),
+                CreatedAt = DateTime.Parse(reader.GetString(reader.GetOrdinal("CreatedAt"))),
+                LastLogin = DateTime.Parse(reader.GetString(reader.GetOrdinal("LastLogin")))
+            };
+        }
+
+        private bool UsernameExists(string username)
+        {
+            using (var connection = new SqliteConnection(connectionString))
+            {
+                connection.Open();
+                var command = connection.CreateCommand();
+                command.CommandText = "SELECT COUNT(*) FROM Players WHERE LOWER(Username) = LOWER(@Username)";
+                command.Parameters.AddWithValue("@Username", username);
+                return Convert.ToInt32(command.ExecuteScalar()) > 0;
+            }
+        }
+
+        private bool EmailExists(string email)
+        {
+            using (var connection = new SqliteConnection(connectionString))
+            {
+                connection.Open();
+                var command = connection.CreateCommand();
+                command.CommandText = "SELECT COUNT(*) FROM Players WHERE LOWER(Email) = LOWER(@Email)";
+                command.Parameters.AddWithValue("@Email", email);
+                return Convert.ToInt32(command.ExecuteScalar()) > 0;
+            }
+        }
+
+        private void UpdatePlayerProfile(Player player)
+        {
+            using (var connection = new SqliteConnection(connectionString))
+            {
+                connection.Open();
+                var command = connection.CreateCommand();
+                command.CommandText = @"
+                    UPDATE Players SET 
+                        Level = @Level,
+                        Experience = @Experience,
+                        ExperienceToNextLevel = @ExperienceToNextLevel,
+                        Gold = @Gold,
+                        Money = @Money,
+                        MMR = @MMR,
+                        Rank = @Rank,
+                        TotalMatches = @TotalMatches,
+                        TotalWins = @TotalWins,
+                        TotalLosses = @TotalLosses,
+                        TotalKills = @TotalKills,
+                        TotalDeaths = @TotalDeaths,
+                        TotalHeadshots = @TotalHeadshots,
+                        TotalAssists = @TotalAssists,
+                        WinRate = @WinRate,
+                        KDRatio = @KDRatio,
+                        TotalPlayTimeTicks = @TotalPlayTimeTicks,
+                        LastLogin = @LastLogin
+                    WHERE PlayerId = @PlayerId";
+
+                command.Parameters.AddWithValue("@Level", player.Level);
+                command.Parameters.AddWithValue("@Experience", player.Experience);
+                command.Parameters.AddWithValue("@ExperienceToNextLevel", player.ExperienceToNextLevel);
+                command.Parameters.AddWithValue("@Gold", player.Gold);
+                command.Parameters.AddWithValue("@Money", player.Money);
+                command.Parameters.AddWithValue("@MMR", player.MMR);
+                command.Parameters.AddWithValue("@Rank", player.Rank);
+
+                if (player.Stats != null)
+                {
+                    command.Parameters.AddWithValue("@TotalMatches", player.Stats.TotalMatches);
+                    command.Parameters.AddWithValue("@TotalWins", player.Stats.TotalWins);
+                    command.Parameters.AddWithValue("@TotalLosses", player.Stats.TotalLosses);
+                    command.Parameters.AddWithValue("@TotalKills", player.Stats.TotalKills);
+                    command.Parameters.AddWithValue("@TotalDeaths", player.Stats.TotalDeaths);
+                    command.Parameters.AddWithValue("@TotalHeadshots", player.Stats.TotalHeadshots);
+                    command.Parameters.AddWithValue("@TotalAssists", player.Stats.TotalAssists);
+                    command.Parameters.AddWithValue("@WinRate", player.Stats.WinRate);
+                    command.Parameters.AddWithValue("@KDRatio", player.Stats.KDRatio);
+                }
+
+                command.Parameters.AddWithValue("@TotalPlayTimeTicks", player.TotalPlayTime.Ticks);
+                command.Parameters.AddWithValue("@LastLogin", DateTime.UtcNow.ToString("o"));
+                command.Parameters.AddWithValue("@PlayerId", player.PlayerId);
+
+                command.ExecuteNonQuery();
+            }
+        }
+
+        private void UpdatePlayerInventory(Player player)
+        {
+            if (player.Inventory == null) return;
+
+            using (var connection = new SqliteConnection(connectionString))
+            {
+                connection.Open();
+                var command = connection.CreateCommand();
+                command.CommandText = @"
+                    UPDATE PlayerInventory SET
+                        OwnedWeapons = @OwnedWeapons,
+                        OwnedSkins = @OwnedSkins,
+                        OwnedGrenades = @OwnedGrenades,
+                        LootBoxes = @LootBoxes
+                    WHERE PlayerId = @PlayerId";
+
+                command.Parameters.AddWithValue("@OwnedWeapons", JsonConvert.SerializeObject(player.Inventory.OwnedWeapons));
+                command.Parameters.AddWithValue("@OwnedSkins", JsonConvert.SerializeObject(player.Inventory.OwnedSkins));
+                command.Parameters.AddWithValue("@OwnedGrenades", JsonConvert.SerializeObject(player.Inventory.OwnedGrenades));
+                command.Parameters.AddWithValue("@LootBoxes", JsonConvert.SerializeObject(player.Inventory.LootBoxes));
+                command.Parameters.AddWithValue("@PlayerId", player.PlayerId);
+
+                command.ExecuteNonQuery();
+            }
+        }
+
+        #endregion
+
         #region Packet Handlers
 
         private async void HandleLogin(string jsonData, IPEndPoint clientEndpoint)
@@ -228,24 +591,20 @@ namespace ServerFpsProjectZero.Networking
             }
 
             // Check if player is already logged in
-            if (usernameToId.TryGetValue(loginRequest.username.ToLower(), out int existingId))
-            {
-                if (connectedPlayers.TryGetValue(existingId, out var existingPlayer))
-                {
-                    SendLoginResponse(clientEndpoint, false, 0, null, "Player already logged in");
-                    OnFailedLogin?.Invoke("Already logged in", clientEndpoint);
-                    return;
-                }
-            }
-
-            // Authenticate player
-            var playerProfile = AuthenticatePlayer(loginRequest.username, loginRequest.password);
+            var playerProfile = GetPlayerProfileFromDb(loginRequest.username);
 
             if (playerProfile == null)
             {
                 SendLoginResponse(clientEndpoint, false, 0, null, "Invalid username or password");
                 OnFailedLogin?.Invoke("Invalid credentials", clientEndpoint);
                 Console.WriteLine($"[LoginManager] Failed login attempt for '{loginRequest.username}' from {clientEndpoint.Address}");
+                return;
+            }
+
+            if (connectedPlayers.TryGetValue(playerProfile.PlayerId, out var existingPlayer))
+            {
+                SendLoginResponse(clientEndpoint, false, 0, null, "Player already logged in");
+                OnFailedLogin?.Invoke("Already logged in", clientEndpoint);
                 return;
             }
 
@@ -264,11 +623,16 @@ namespace ServerFpsProjectZero.Networking
             connectedPlayers[player.PlayerId] = player;
             tokenToPlayer[player.SessionToken] = player;
 
+            // Update last login in database
+            UpdatePlayerProfile(player);
+
             // Send success response
             SendLoginResponse(clientEndpoint, true, player.PlayerId, player.SessionToken, "Login successful");
 
             Console.WriteLine($"[LoginManager] ✓ Player '{player.Username}' (ID: {player.PlayerId}, MMR: {player.MMR}) logged in from {clientEndpoint.Address}");
+
             OnPlayerLoggedIn?.Invoke(player);
+            friendsManager?.UpdatePlayerStatus(player.PlayerId, PlayerStatus.Online);
         }
 
         private Player CreatePlayerFromProfile(PlayerProfile profile)
@@ -289,23 +653,6 @@ namespace ServerFpsProjectZero.Networking
                 CreatedAt = profile.CreatedAt,
                 LastLogin = profile.LastLogin
             };
-        }
-
-        private PlayerProfile AuthenticatePlayer(string username, string password)
-        {
-            if (!usernameToId.TryGetValue(username.ToLower(), out int playerId))
-            {
-                return null;
-            }
-
-            if (!playerDatabase.TryGetValue(playerId, out PlayerProfile playerProfile))
-            {
-                return null;
-            }
-
-            // In a real implementation, verify password hash
-            // For test accounts, we're just checking if the profile exists
-            return playerProfile;
         }
 
         private async void HandleRegister(string jsonData, IPEndPoint clientEndpoint)
@@ -450,16 +797,9 @@ namespace ServerFpsProjectZero.Networking
                         player.Stats.TotalKills;
                 }
 
-                // Update player profile in database
-                if (playerDatabase.TryGetValue(playerId, out PlayerProfile profile))
-                {
-                    profile.Gold = player.Gold;
-                    profile.Experience = player.Experience;
-                    profile.Level = player.Level;
-                    profile.ExperienceToNextLevel = player.ExperienceToNextLevel;
-                    profile.TotalStats = player.Stats;
-                    profile.LastLogin = DateTime.UtcNow;
-                }
+                // Save to database
+                UpdatePlayerProfile(player);
+                UpdatePlayerInventory(player);
 
                 Console.WriteLine($"[LoginManager] {player.Username} updated stats - Kills: {player.Kills}, Deaths: {player.Deaths}");
             }
@@ -469,8 +809,14 @@ namespace ServerFpsProjectZero.Networking
         {
             if (player == null) return;
 
+            friendsManager?.OnPlayerDisconnected(player.PlayerId);
+
             // Remove from queue if in queue
             matchmakingQueue.RemoveFromQueue(player);
+
+            // Save player data to database before disconnecting
+            UpdatePlayerProfile(player);
+            UpdatePlayerInventory(player);
 
             // Update player state
             player.IsConnected = false;
@@ -548,6 +894,11 @@ namespace ServerFpsProjectZero.Networking
 
             bool added = matchmakingQueue.AddToQueue(player);
 
+            if (added)
+            {
+                friendsManager?.UpdatePlayerStatus(player.PlayerId, PlayerStatus.InQueue);
+            }
+
             var queueResponse = new QueueResponseData
             {
                 type = "queue_response",
@@ -579,6 +930,11 @@ namespace ServerFpsProjectZero.Networking
             }
 
             bool removed = matchmakingQueue.RemoveFromQueue(player);
+
+            if (removed)
+            {
+                friendsManager?.UpdatePlayerStatus(player.PlayerId, PlayerStatus.Online);
+            }
 
             var response = new QueueResponseData
             {
@@ -633,6 +989,8 @@ namespace ServerFpsProjectZero.Networking
             {
                 if (player.IsConnected)
                 {
+                    friendsManager?.UpdatePlayerStatus(player.PlayerId, PlayerStatus.InGame);
+
                     var gameStartPacket = new GameStartData
                     {
                         type = "game_start",
@@ -740,16 +1098,6 @@ namespace ServerFpsProjectZero.Networking
             return 100 + (level * 50);
         }
 
-        private bool UsernameExists(string username)
-        {
-            return usernameToId.ContainsKey(username.ToLower());
-        }
-
-        private bool EmailExists(string email)
-        {
-            return emailToId.ContainsKey(email.ToLower());
-        }
-
         private string GenerateSalt()
         {
             byte[] saltBytes = new byte[32];
@@ -833,8 +1181,20 @@ namespace ServerFpsProjectZero.Networking
 
         public PlayerProfile GetPlayerProfile(int playerId)
         {
-            playerDatabase.TryGetValue(playerId, out PlayerProfile profile);
-            return profile;
+            // First check connected players
+            var player = GetPlayerById(playerId);
+            if (player != null)
+            {
+                return player.GetFullProfile();
+            }
+
+            // Fall back to database
+            return GetPlayerProfileFromDbById(playerId);
+        }
+
+        public void UpdatePlayerStatusForFriends(int playerId, PlayerStatus status)
+        {
+            friendsManager?.UpdatePlayerStatus(playerId, status);
         }
 
         public void PrintActivePlayers()

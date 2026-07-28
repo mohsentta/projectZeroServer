@@ -50,6 +50,11 @@ namespace ServerFpsProjectZero.Server
         public event Action<string, IPEndPoint> OnLeaveQueuePacket;
         public event Action<string, IPEndPoint> OnGetQueueStatusPacket;
         public event Action<int, int, int, bool, int, int> OnPlayerGameStatsUpdate;
+        //friends events:
+        public event Action<string, IPEndPoint> OnGetFriendsPacket;
+        public event Action<string, IPEndPoint> OnSendFriendRequestPacket;
+        public event Action<string, IPEndPoint> OnRespondFriendRequestPacket;
+        public event Action<string, IPEndPoint> OnRemoveFriendPacket;
 
 
         public ServerManager(int port = 7777)
@@ -171,6 +176,7 @@ namespace ServerFpsProjectZero.Server
                         OnMovementPacket?.Invoke(jsonData, remoteEndpoint);
                         break;
                     case "shoot":
+                    case "shoot_input":
                         OnShootPacket?.Invoke(jsonData, remoteEndpoint);
                         break;
                     case "use_ability":
@@ -193,6 +199,18 @@ namespace ServerFpsProjectZero.Server
                         break;
                     case "ping_marker":
                         OnPingMarkerPacket?.Invoke(jsonData, remoteEndpoint);
+                        break;
+                    case "get_friends":
+                        OnGetFriendsPacket?.Invoke(jsonData, remoteEndpoint);
+                        break;
+                    case "send_friend_request":
+                        OnSendFriendRequestPacket?.Invoke(jsonData, remoteEndpoint);
+                        break;
+                    case "respond_friend_request":
+                        OnRespondFriendRequestPacket?.Invoke(jsonData, remoteEndpoint);
+                        break;
+                    case "remove_friend":
+                        OnRemoveFriendPacket?.Invoke(jsonData, remoteEndpoint);
                         break;
                     default:
                         Console.WriteLine($"[ServerManager] Unknown packet type: {type}");
