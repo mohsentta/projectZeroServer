@@ -1,4 +1,4 @@
-﻿using ServerFpsProjectZero.Server;
+using ServerFpsProjectZero.Server;
 using ServerFpsProjectZero.Shared;
 using System;
 using System.Collections.Generic;
@@ -63,6 +63,7 @@ namespace ServerFpsProjectZero.Models
         // Timestamps
         public DateTime CreatedAt { get; set; }
         public DateTime LastLogin { get; set; }
+        public int LoginStreak { get; set; }
         public TimeSpan TotalPlayTime { get; set; }
 
         public Player()

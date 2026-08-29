@@ -1,4 +1,4 @@
-﻿using Microsoft.Data.Sqlite;
+using Microsoft.Data.Sqlite;
 using Newtonsoft.Json;
 using ServerFpsProjectZero.Matchmaking;
 using ServerFpsProjectZero.Models;
@@ -624,7 +624,10 @@ namespace ServerFpsProjectZero.Networking
             tokenToPlayer[player.SessionToken] = player;
 
             // Update last login in database
+            
+            HandleDailyLogin(player); and check for daily login rewards
             UpdatePlayerProfile(player);
+            HandleDailyLogin(player);
 
             // Send success response
             SendLoginResponse(clientEndpoint, true, player.PlayerId, player.SessionToken, "Login successful");
@@ -1198,6 +1201,36 @@ namespace ServerFpsProjectZero.Networking
         }
 
         public void PrintActivePlayers()
+        {
+            Console.WriteLine($"\n[LoginManager] Active Players: {connectedPlayers.Count}");
+            foreach (var player in connectedPlayers.Values)
+            {
+                string queueStatus = player.IsInQueue ? $" (In Queue - Pos: {matchmakingQueue.GetQueuePosition(player.PlayerId)})" : "";
+                string gameStatus = player.IsInGame ? " (In Game)" : "";
+                Console.WriteLine($"  - {player.Username} (ID: {player.PlayerId}, MMR: {player.MMR}, Rank: {player.Rank}){queueStatus}{gameStatus}");
+            }
+            Console.WriteLine($"\n[Matchmaking] Queue Size: {matchmakingQueue.QueueSize}/{MatchmakingQueue.PLAYERS_PER_GAME}");
+        }
+
+        private void HandleDailyLogin(Player player)
+        {
+            if (player.LastLogin == DateTime.MinValue || 
+                player.LastLogin.Date < DateTime.UtcNow.Date)
+            {
+                Console.WriteLine($"[LoginManager] Daily Login Reward granted to '{player.Username}'");
+                
+                // Grant rewards
+                player.Gold += 100;
+                player.Experience += 50;
+                
+                // Update the profile in the database
+                UpdatePlayerProfile(player);
+            }
+            else
+            {
+                Console.WriteLine($"[LoginManager] Player '{player.Username}' already logged in today.");
+            }
+        }
         {
             Console.WriteLine($"\n[LoginManager] Active Players: {connectedPlayers.Count}");
             foreach (var player in connectedPlayers.Values)
