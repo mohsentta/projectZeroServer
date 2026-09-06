@@ -228,8 +228,29 @@ namespace ServerFpsProjectZero.Networking
                 command.CommandText = "CREATE INDEX IF NOT EXISTS idx_players_mmr ON Players(MMR)";
                 command.ExecuteNonQuery();
 
+                // Lightweight migration for databases created by an older schema:
+                // add any newer columns without dropping or wiping existing data.
+                EnsureColumn(connection, "Players", "LoginStreak", "INTEGER DEFAULT 0");
+
                 Console.WriteLine("[Database] SQLite database initialized successfully");
             }
+        }
+
+        /// <summary>
+        /// Adds a column to an existing table when it is missing (lightweight
+        /// migration for databases created by an older schema). Preserves data.
+        /// </summary>
+        private void EnsureColumn(SqliteConnection connection, string table, string column, string definition)
+        {
+            var check = connection.CreateCommand();
+            check.CommandText = $"SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = '{column}'";
+            bool exists = Convert.ToInt64(check.ExecuteScalar()) > 0;
+            if (exists) return;
+
+            var alter = connection.CreateCommand();
+            alter.CommandText = $"ALTER TABLE \"{table}\" ADD COLUMN \"{column}\" {definition}";
+            alter.ExecuteNonQuery();
+            Console.WriteLine($"[Database] Migrated table '{table}': added column '{column}' {definition}");
         }
 
         private int GetPlayerCount()
