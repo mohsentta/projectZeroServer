@@ -951,10 +951,14 @@ namespace ServerFpsProjectZero.Server
         public int RedScore { get; set; }
         public int BlueScore { get; set; }
         public bool IsActive { get; set; }
-        public Dictionary<int, InGameStats> PlayerStats { get; set; } = new Dictionary<int, InGameStats>();
-        public Dictionary<int, Vector3Data> PlayerPositions { get; set; } = new Dictionary<int, Vector3Data>();
-        public Dictionary<int, Vector2Data> PlayerRotations { get; set; } = new Dictionary<int, Vector2Data>();
-        public Dictionary<int, PlayerStateInfo> PlayerStates { get; set; } = new Dictionary<int, PlayerStateInfo>();
+        // Thread-safety: these dictionaries are read by the game-loop thread
+        // (SendGameState/EndGame) while packet handlers running on the thread pool
+        // mutate them. Plain Dictionary corrupts or throws under concurrent access;
+        // ConcurrentDictionary makes those reads/writes safe.
+        public ConcurrentDictionary<int, InGameStats> PlayerStats { get; set; } = new ConcurrentDictionary<int, InGameStats>();
+        public ConcurrentDictionary<int, Vector3Data> PlayerPositions { get; set; } = new ConcurrentDictionary<int, Vector3Data>();
+        public ConcurrentDictionary<int, Vector2Data> PlayerRotations { get; set; } = new ConcurrentDictionary<int, Vector2Data>();
+        public ConcurrentDictionary<int, PlayerStateInfo> PlayerStates { get; set; } = new ConcurrentDictionary<int, PlayerStateInfo>();
     }
 
     public class InGameStats
