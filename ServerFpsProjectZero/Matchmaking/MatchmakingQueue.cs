@@ -1,4 +1,4 @@
-﻿using ServerFpsProjectZero.Models;
+using ServerFpsProjectZero.Models;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -382,8 +382,11 @@ namespace ServerFpsProjectZero.Matchmaking
             StartTime = DateTime.UtcNow;
             Console.WriteLine($"[GameSession] Game {GameId} started!");
 
-            // Start game timer
-            gameTimer = new Timer(UpdateGameTimer, null, 1000, 1000);
+            // NOTE: do NOT start the independent 600s game timer here anymore.
+            // GameManager.GameRoom is the single authority for the match loop and
+            // already awards stats/rewards on EndGame/forfeit. The old GameSession
+            // timer ran in parallel and called RecordMatchResult a second time,
+            // doubling gold/XP/stats. GameSession now only models team assignment.
         }
 
         private void UpdateGameTimer(object state)
