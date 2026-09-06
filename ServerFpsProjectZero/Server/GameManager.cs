@@ -23,6 +23,7 @@ namespace ServerFpsProjectZero.Server
         private const int TICK_RATE = 20;
         private const float TICK_TIME = 1f / TICK_RATE;
         private const float GAME_DURATION = 600f;
+        private const int MinPlayersPerGame = 2;
 
         public GameManager(ServerManager serverManager)
         {
@@ -307,6 +308,11 @@ namespace ServerFpsProjectZero.Server
                 player.CurrentGameId = -1;
                 player.TeamId = -1;
                 player.IsDead = false;
+
+                // Clear the parallel Player-model in-game flags too, otherwise the
+                // player is blocked from re-queueing ("already in a game") even
+                // though the match has ended.
+                loginManager?.ResetPlayerGameState(player.PlayerId);
 
                 Console.WriteLine($"[GameManager] Game {game.GameId} ended for {player.Username}: {(isWinner ? "WINNER" : "LOSER")} - K/D: {stats.Kills}/{stats.Deaths}, Gold: +{goldReward}, XP: +{xpReward}");
             }
@@ -827,10 +833,77 @@ namespace ServerFpsProjectZero.Server
                     };
                     BroadcastToGameExcept(game, playerId, disconnectData);
 
+                    // If the match can no longer be played (fewer than the minimum
+                    // number of players remain), forfeit it so the surviving client
+                    // is not left stuck in a live game until the timer expires.
+                    int remainingConnected = game.RedTeam.Concat(game.BlueTeam)
+                        .Count(p => p.InGame && p.IsConnected);
+                    if (remainingConnected < MinPlayersPerGame)
+                    {
+                        ForfeitGame(game);
+                    }
+
                     return true;
                 }
             }
             return false;
+        }
+
+        /// <summary>
+        /// Ends a game early because a player left and not enough players remain.
+        /// The surviving player wins by forfeit; their in-game flags (both the
+        /// ClientConnection and the Player-model flags) are cleared so they can
+        /// immediately join the queue again.
+        /// </summary>
+        private void ForfeitGame(GameRoom game)
+        {
+            game.IsActive = false;
+
+            foreach (var player in game.RedTeam.Concat(game.BlueTeam).ToList())
+            {
+                // Clear flags on every participant (including any already-disconnected
+                // client) so no stale InGame state survives.
+                player.InGame = false;
+                player.CurrentGameId = -1;
+                player.TeamId = -1;
+                player.IsDead = false;
+
+                if (!player.IsConnected)
+                    continue;
+
+                var stats = game.PlayerStats.TryGetValue(player.PlayerId, out var s)
+                    ? s : new InGameStats();
+
+                bool isWinner = true; // opponent left the match
+                int goldReward = 100 + (stats.Kills * 10) + 50;
+                int xpReward = 50 + (stats.Kills * 5) + 25;
+
+                serverManager.UpdatePlayerGameStats(player.PlayerId, stats.Kills, stats.Deaths, isWinner, goldReward, xpReward);
+
+                var result = new MatchResult
+                {
+                    IsWin = isWinner,
+                    GoldReward = goldReward,
+                    ExperienceReward = xpReward,
+                    Kills = stats.Kills,
+                    Deaths = stats.Deaths
+                };
+
+                var gameEndData = new
+                {
+                    type = "game_end",
+                    result = result,
+                    timestamp = DateTime.UtcNow
+                };
+                serverManager.SendPacket(gameEndData, player);
+
+                loginManager?.UpdatePlayerStatusForFriends(player.PlayerId, PlayerStatus.Online);
+                loginManager?.ResetPlayerGameState(player.PlayerId);
+
+                Console.WriteLine($"[GameManager] Game {game.GameId} forfeited: {player.Username} wins (opponent disconnected)");
+            }
+
+            activeGames.TryRemove(game.GameId, out _);
         }
 
         public void PrintActiveGames()

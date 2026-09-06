@@ -669,11 +669,15 @@ namespace ServerFpsProjectZero.Networking
                 return;
             }
 
+            // Reconnect support: if this account already has a session, tear down the
+            // old one first instead of hard-rejecting. On a clean client quit the old
+            // session is gone via logout/heartbeat; this covers the case where the
+            // client crashed or the UDP socket died without a logout, which previously
+            // locked the account ("Player already logged in") until a server restart.
             if (connectedPlayers.TryGetValue(playerProfile.PlayerId, out var existingPlayer))
             {
-                SendLoginResponse(clientEndpoint, false, 0, null, "Player already logged in");
-                OnFailedLogin?.Invoke("Already logged in", clientEndpoint);
-                return;
+                Console.WriteLine($"[LoginManager] Player '{playerProfile.Username}' reconnecting - replacing existing session");
+                DisconnectPlayer(existingPlayer);
             }
 
             // Create Player instance from profile
@@ -915,6 +919,26 @@ namespace ServerFpsProjectZero.Networking
 
             Console.WriteLine($"[LoginManager] Player '{player.Username}' disconnected");
             OnPlayerDisconnected?.Invoke(player);
+        }
+
+        /// <summary>
+        /// Clears the in-game flags on the Player model for a player who is no
+        /// longer in a game (used when the game ends or is forfeited). The
+        /// ClientConnection flags are owned by GameManager; this clears the
+        /// parallel Player-model flags that block matchmaking re-entry.
+        /// </summary>
+        public void ResetPlayerGameState(int playerId)
+        {
+            if (connectedPlayers.TryGetValue(playerId, out Player player))
+            {
+                player.IsInGame = false;
+                player.IsInQueue = false;
+                player.CurrentGameId = -1;
+                player.TeamId = -1;
+                player.Kills = 0;
+                player.Deaths = 0;
+                player.Score = 0;
+            }
         }
 
         private void HandleGetProfile(string jsonData, IPEndPoint clientEndpoint)
