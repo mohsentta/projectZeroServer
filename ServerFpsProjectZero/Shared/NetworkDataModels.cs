@@ -1,4 +1,4 @@
-﻿// Shared/NetworkDataModels.cs
+// Shared/NetworkDataModels.cs
 using System;
 using System.Collections.Generic;
 
@@ -99,6 +99,10 @@ namespace ServerFpsProjectZero.Shared
         public TimeSpan TotalPlayTime { get; set; }
         public DateTime CreatedAt { get; set; }
         public DateTime LastLogin { get; set; }
+        public int LoginStreak { get; set; }
+        public bool ClaimedDailyRewardToday { get; set; }
+        public int DailyRewardGoldGranted { get; set; }
+        public int DailyRewardXpGranted { get; set; }
 
         public PlayerProfile()
         {

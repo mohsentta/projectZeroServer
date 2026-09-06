@@ -1,4 +1,4 @@
-﻿using ServerFpsProjectZero.Networking;
+using ServerFpsProjectZero.Networking;
 using ServerFpsProjectZero.Server;
 using System;
 
@@ -99,6 +99,7 @@ namespace ServerFpsProjectZero
             Console.WriteLine("  'clients' - Show connected clients");
             Console.WriteLine("  'games' - Show active games");
             Console.WriteLine("  'friends' - Show friends statistics");
+            Console.WriteLine("  'restart' - Wipe server data (drop all tables) and reinitialize");
             Console.WriteLine("  'help' - Show this menu");
             Console.WriteLine("  'quit' - Shutdown server\n");
 
@@ -121,6 +122,10 @@ namespace ServerFpsProjectZero
                         break;
                     case "friends":
                         PrintFriendsStats(friendsManager);
+                        break;
+                    case "restart":
+                    case "wipe":
+                        loginManager.ResetDatabase();
                         break;
                     case "help":
                         PrintHelp();
@@ -154,6 +159,7 @@ namespace ServerFpsProjectZero
             Console.WriteLine("  'clients' - Show connected client connections");
             Console.WriteLine("  'games' - Show active game sessions");
             Console.WriteLine("  'friends' - Show friends system statistics");
+            Console.WriteLine("  'restart' - Wipe server data (drop all tables) and reinitialize");
             Console.WriteLine("  'help' - Show this help menu");
             Console.WriteLine("  'quit' - Shutdown the server\n");
         }

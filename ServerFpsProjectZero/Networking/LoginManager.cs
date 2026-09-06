@@ -102,6 +102,53 @@ namespace ServerFpsProjectZero.Networking
             Console.WriteLine("[LoginManager] Stopped");
         }
 
+        /// <summary>
+        /// Wipes all persistent server data (drops every table in the database)
+        /// and reinitializes the schema + test accounts. Bound to the 'restart'
+        /// console command. Called on-demand, never automatically at startup.
+        /// </summary>
+        public void ResetDatabase()
+        {
+            Console.WriteLine("\n[LoginManager] Wiping server data...");
+
+            // Disconnect any currently connected players and clear in-memory state.
+            foreach (var player in connectedPlayers.Values)
+            {
+                if (player.IsConnected)
+                    friendsManager?.UpdatePlayerStatus(player.PlayerId, PlayerStatus.Offline);
+            }
+            connectedPlayers.Clear();
+            tokenToPlayer.Clear();
+
+            // Drop every user table (ignore SQLite internal sqlite_* tables).
+            using (var connection = new SqliteConnection(connectionString))
+            {
+                connection.Open();
+                var names = new List<string>();
+                var listCmd = connection.CreateCommand();
+                listCmd.CommandText = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'";
+                using (var reader = listCmd.ExecuteReader())
+                {
+                    while (reader.Read())
+                        names.Add(reader.GetString(0));
+                }
+
+                var dropCmd = connection.CreateCommand();
+                foreach (var table in names)
+                {
+                    dropCmd.CommandText = $"DROP TABLE IF EXISTS \"{table}\"";
+                    dropCmd.ExecuteNonQuery();
+                    Console.WriteLine($"[LoginManager] Dropped table '{table}'");
+                }
+            }
+
+            // Recreate the schema and seed test accounts.
+            InitializeDatabase();
+            InitializeTestPlayers();
+
+            Console.WriteLine("[LoginManager] Server data wiped and reinitialized.");
+        }
+
         #region Database Initialization
 
         private void InitializeDatabase()
@@ -112,13 +159,9 @@ namespace ServerFpsProjectZero.Networking
 
                 var command = connection.CreateCommand();
 
-                // Drop existing tables in reverse dependency order so schema is always fresh
-                command.CommandText = "DROP TABLE IF EXISTS PlayerLoadout";
-                command.ExecuteNonQuery();
-                command.CommandText = "DROP TABLE IF EXISTS PlayerInventory";
-                command.ExecuteNonQuery();
-                command.CommandText = "DROP TABLE IF EXISTS Players";
-                command.ExecuteNonQuery();
+                // NOTE: Tables are deliberately NOT dropped on startup anymore, so
+                // player data persists across normal restarts. Wiping happens on
+                // demand via the 'restart' console command -> LoginManager.ResetDatabase().
 
                 // Create players table
                 command.CommandText = @"
@@ -146,7 +189,8 @@ namespace ServerFpsProjectZero.Networking
                         KDRatio REAL DEFAULT 0.0,
                         TotalPlayTimeTicks BIGINT DEFAULT 0,
                         CreatedAt TEXT NOT NULL,
-                        LastLogin TEXT NOT NULL
+                        LastLogin TEXT NOT NULL,
+                        LoginStreak INTEGER DEFAULT 0
                     )";
                 command.ExecuteNonQuery();
 
@@ -464,7 +508,8 @@ namespace ServerFpsProjectZero.Networking
                 },
                 TotalPlayTime = TimeSpan.FromTicks(reader.GetInt64(reader.GetOrdinal("TotalPlayTimeTicks"))),
                 CreatedAt = DateTime.Parse(reader.GetString(reader.GetOrdinal("CreatedAt"))),
-                LastLogin = DateTime.Parse(reader.GetString(reader.GetOrdinal("LastLogin")))
+                LastLogin = DateTime.Parse(reader.GetString(reader.GetOrdinal("LastLogin"))),
+                LoginStreak = reader.GetInt32(reader.GetOrdinal("LoginStreak"))
             };
         }
 
@@ -517,7 +562,8 @@ namespace ServerFpsProjectZero.Networking
                         WinRate = @WinRate,
                         KDRatio = @KDRatio,
                         TotalPlayTimeTicks = @TotalPlayTimeTicks,
-                        LastLogin = @LastLogin
+                        LastLogin = @LastLogin,
+                        LoginStreak = @LoginStreak
                     WHERE PlayerId = @PlayerId";
 
                 command.Parameters.AddWithValue("@Level", player.Level);
@@ -543,6 +589,7 @@ namespace ServerFpsProjectZero.Networking
 
                 command.Parameters.AddWithValue("@TotalPlayTimeTicks", player.TotalPlayTime.Ticks);
                 command.Parameters.AddWithValue("@LastLogin", DateTime.UtcNow.ToString("o"));
+                command.Parameters.AddWithValue("@LoginStreak", player.LoginStreak);
                 command.Parameters.AddWithValue("@PlayerId", player.PlayerId);
 
                 command.ExecuteNonQuery();
@@ -613,6 +660,12 @@ namespace ServerFpsProjectZero.Networking
             player.ClientEndpoint = clientEndpoint;
             player.IsConnected = true;
             player.LastHeartbeat = DateTime.UtcNow;
+
+            // Grant any due daily-login reward using the PREVIOUS login time
+            // (player.LastLogin still holds the value loaded from the profile
+            // here, because we have not overwritten it with "now" yet).
+            ApplyDailyLogin(player);
+
             player.LastLogin = DateTime.UtcNow;
 
             // Create client connection in server manager
@@ -623,16 +676,14 @@ namespace ServerFpsProjectZero.Networking
             connectedPlayers[player.PlayerId] = player;
             tokenToPlayer[player.SessionToken] = player;
 
-            // Update last login in database
-            
-            HandleDailyLogin(player); and check for daily login rewards
+            // Update the player profile (now includes the refreshed LastLogin,
+            // LoginStreak and any daily-login reward that was just granted).
             UpdatePlayerProfile(player);
-            HandleDailyLogin(player);
 
             // Send success response
             SendLoginResponse(clientEndpoint, true, player.PlayerId, player.SessionToken, "Login successful");
 
-            Console.WriteLine($"[LoginManager] ✓ Player '{player.Username}' (ID: {player.PlayerId}, MMR: {player.MMR}) logged in from {clientEndpoint.Address}");
+            Console.WriteLine($"[LoginManager] âœ“ Player '{player.Username}' (ID: {player.PlayerId}, MMR: {player.MMR}) logged in from {clientEndpoint.Address}");
 
             OnPlayerLoggedIn?.Invoke(player);
             friendsManager?.UpdatePlayerStatus(player.PlayerId, PlayerStatus.Online);
@@ -654,7 +705,8 @@ namespace ServerFpsProjectZero.Networking
                 Stats = profile.TotalStats ?? new PlayerStats(),
                 TotalPlayTime = profile.TotalPlayTime,
                 CreatedAt = profile.CreatedAt,
-                LastLogin = profile.LastLogin
+                LastLogin = profile.LastLogin,
+                LoginStreak = profile.LoginStreak
             };
         }
 
@@ -714,7 +766,7 @@ namespace ServerFpsProjectZero.Networking
             if (playerId > 0)
             {
                 SendRegisterResponse(clientEndpoint, true, "Registration successful! Please login.");
-                Console.WriteLine($"[LoginManager] ✓ New player registered: '{registerRequest.username}' (ID: {playerId})");
+                Console.WriteLine($"[LoginManager] âœ“ New player registered: '{registerRequest.username}' (ID: {playerId})");
             }
             else
             {
@@ -813,6 +865,11 @@ namespace ServerFpsProjectZero.Networking
             if (player == null) return;
 
             friendsManager?.OnPlayerDisconnected(player.PlayerId);
+
+            // Remove the player from any active game first so the remaining
+            // clients receive a player_despawn and stop rendering them.
+            if (player.IsInGame)
+                gameManager?.RemovePlayerFromGame(player.PlayerId);
 
             // Remove from queue if in queue
             matchmakingQueue.RemoveFromQueue(player);
@@ -986,37 +1043,21 @@ namespace ServerFpsProjectZero.Networking
 
         private void HandleGameMatched(List<Player> players, GameSession gameSession)
         {
-            Console.WriteLine($"\n[LoginManager] Game {gameSession.GameId} starting with {players.Count} players");
+            Console.WriteLine($"\n[LoginManager] Matchmaking complete with {players.Count} players; creating game.");
 
+            // Mark matched players as InGame for their friends.
             foreach (var player in players)
             {
                 if (player.IsConnected)
-                {
                     friendsManager?.UpdatePlayerStatus(player.PlayerId, PlayerStatus.InGame);
-
-                    var gameStartPacket = new GameStartData
-                    {
-                        type = "game_start",
-                        gameId = gameSession.GameId,
-                        teamId = player.TeamId,
-                        mapName = Map.Office,
-                        gameType = GameType.TeamDeathmatch,
-                        players = players.Select(p => new GamePlayerData
-                        {
-                            playerId = p.PlayerId,
-                            username = p.Username,
-                            level = p.Level,
-                            mmr = p.MMR,
-                            rank = p.Rank,
-                            teamId = p.TeamId,
-                            loadout = p.Loadout
-                        }).ToList(),
-                        timestamp = DateTime.UtcNow
-                    };
-                    gameManager.CreateGame(players, GameType.TeamDeathmatch, Map.Office);
-                    serverManager.SendPacket(gameStartPacket, player.ClientEndpoint);
-                }
             }
+
+            // GameManager.CreateGame is the single authority here: it assigns a
+            // stable game id and balanced teams and sends one authoritative
+            // game_start (+ player_spawn) packet to each participant. Calling it
+            // once avoids the previous bug of creating N GameRooms per match and
+            // sending conflicting game_start packets with mismatched ids/teams.
+            gameManager.CreateGame(players, GameType.TeamDeathmatch, Map.Office);
         }
 
         private void HandlePlayerEnteredQueue(QueuedPlayer queuedPlayer)
@@ -1212,34 +1253,42 @@ namespace ServerFpsProjectZero.Networking
             Console.WriteLine($"\n[Matchmaking] Queue Size: {matchmakingQueue.QueueSize}/{MatchmakingQueue.PLAYERS_PER_GAME}");
         }
 
-        private void HandleDailyLogin(Player player)
+        private void ApplyDailyLogin(Player player)
         {
-            if (player.LastLogin == DateTime.MinValue || 
-                player.LastLogin.Date < DateTime.UtcNow.Date)
+            if (player == null) return;
+
+            DateTime now = DateTime.UtcNow;
+            DateTime last = player.LastLogin;
+
+            // Already logged in today: no new reward, just report the state so the
+            // client can reflect that today's reward is unavailable.
+            if (last != DateTime.MinValue && last.Date == now.Date)
             {
-                Console.WriteLine($"[LoginManager] Daily Login Reward granted to '{player.Username}'");
-                
-                // Grant rewards
-                player.Gold += 100;
-                player.Experience += 50;
-                
-                // Update the profile in the database
-                UpdatePlayerProfile(player);
+                player.DailyRewardClaimedToday = true;
+                player.DailyRewardGoldGranted = 0;
+                player.DailyRewardXpGranted = 0;
+                Console.WriteLine($"[LoginManager] Player '{player.Username}' already claimed today's login reward.");
+                return;
             }
-            else
-            {
-                Console.WriteLine($"[LoginManager] Player '{player.Username}' already logged in today.");
-            }
-        }
-        {
-            Console.WriteLine($"\n[LoginManager] Active Players: {connectedPlayers.Count}");
-            foreach (var player in connectedPlayers.Values)
-            {
-                string queueStatus = player.IsInQueue ? $" (In Queue - Pos: {matchmakingQueue.GetQueuePosition(player.PlayerId)})" : "";
-                string gameStatus = player.IsInGame ? " (In Game)" : "";
-                Console.WriteLine($"  - {player.Username} (ID: {player.PlayerId}, MMR: {player.MMR}, Rank: {player.Rank}){queueStatus}{gameStatus}");
-            }
-            Console.WriteLine($"\n[Matchmaking] Queue Size: {matchmakingQueue.QueueSize}/{MatchmakingQueue.PLAYERS_PER_GAME}");
+
+            // The streak continues if the previous login was yesterday, otherwise it resets.
+            player.LoginStreak = (last != DateTime.MinValue && last.Date == now.Date.AddDays(-1))
+                ? player.LoginStreak + 1
+                : 1;
+
+            // Reward scales with the streak up to a modest cap.
+            int bonus = Math.Min(player.LoginStreak - 1, 6);
+            int gold = 100 + bonus * 25; // day1 = 100 gold, day7+ = 250 gold
+            int xp = 50 + bonus * 15;    // day1 = 50 XP,   day7+ = 140 XP
+
+            player.AddGold(gold);
+            player.AddExperience(xp); // AddExperience handles level-ups
+
+            player.DailyRewardClaimedToday = true;
+            player.DailyRewardGoldGranted = gold;
+            player.DailyRewardXpGranted = xp;
+
+            Console.WriteLine($"[LoginManager] Daily login reward for '{player.Username}': streak={player.LoginStreak}, +{gold} gold, +{xp} XP");
         }
 
         #endregion

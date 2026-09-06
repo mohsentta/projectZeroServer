@@ -66,6 +66,11 @@ namespace ServerFpsProjectZero.Models
         public int LoginStreak { get; set; }
         public TimeSpan TotalPlayTime { get; set; }
 
+        // Daily-login reward (session-lifetime; not persisted independently of LoginStreak)
+        public bool DailyRewardClaimedToday { get; set; }
+        public int DailyRewardGoldGranted { get; set; }
+        public int DailyRewardXpGranted { get; set; }
+
         public Player()
         {
             Inventory = new PlayerInventory();
@@ -354,7 +359,11 @@ namespace ServerFpsProjectZero.Models
                 Loadout = this.Loadout,
                 TotalPlayTime = this.TotalPlayTime,
                 CreatedAt = this.CreatedAt,
-                LastLogin = this.LastLogin
+                LastLogin = this.LastLogin,
+                LoginStreak = this.LoginStreak,
+                ClaimedDailyRewardToday = this.DailyRewardClaimedToday,
+                DailyRewardGoldGranted = this.DailyRewardGoldGranted,
+                DailyRewardXpGranted = this.DailyRewardXpGranted
             };
         }
 

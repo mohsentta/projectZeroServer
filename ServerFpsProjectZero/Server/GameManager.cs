@@ -1,4 +1,4 @@
-﻿using Newtonsoft.Json;
+using Newtonsoft.Json;
 using ServerFpsProjectZero.Models;
 using ServerFpsProjectZero.Networking;
 using ServerFpsProjectZero.Shared;
@@ -353,9 +353,22 @@ namespace ServerFpsProjectZero.Server
             if (!activeGames.TryGetValue(client.CurrentGameId, out var game))
                 return;
 
-            var shooterPos = game.PlayerPositions.ContainsKey(client.PlayerId)
-                ? game.PlayerPositions[client.PlayerId]
-                : new Vector3Data();
+            var shooterPos = new Vector3Data { x = input.originX, y = input.originY, z = input.originZ };
+            var aimPos = new Vector3Data { x = input.targetX, y = input.targetY, z = input.targetZ };
+
+            // Server-side shot check: cast the shot ray and test each enemy's
+            // last-known position against it. Replaces the old point-blank
+            // "both within 15 units" sphere, which made ranged fire impossible.
+            float sdx = aimPos.x - shooterPos.x, sdy = aimPos.y - shooterPos.y, sdz = aimPos.z - shooterPos.z;
+            float sLen = (float)Math.Sqrt(sdx * sdx + sdy * sdy + sdz * sdz);
+            float dirX = sLen > 0.0001f ? sdx / sLen : 0f;
+            float dirY = sLen > 0.0001f ? sdy / sLen : 0f;
+            float dirZ = sLen > 0.0001f ? sdz / sLen : 1f;
+
+            const float BODY_RADIUS = 1.2f;
+            const float HEAD_RADIUS = 0.55f;
+            const float HEAD_HEIGHT = 1.6f;
+            const float MAX_RANGE = 200f;
 
             foreach (var target in game.RedTeam.Concat(game.BlueTeam))
             {
@@ -366,16 +379,33 @@ namespace ServerFpsProjectZero.Server
                     continue;
 
                 var targetPos = game.PlayerPositions[target.PlayerId];
-                var targetPoint = new Vector3Data { x = input.targetX, y = input.targetY, z = input.targetZ };
 
-                float distanceToTarget = CalculateDistance(shooterPos, targetPos);
-                float distanceToShot = CalculateDistance(shooterPos, targetPoint);
+                // Distance travelled along the ray before reaching the target.
+                float tx = targetPos.x - shooterPos.x, ty = targetPos.y - shooterPos.y, tz = targetPos.z - shooterPos.z;
+                float distanceToTarget = tx * dirX + ty * dirY + tz * dirZ;
+                if (distanceToTarget < 0f || distanceToTarget > MAX_RANGE)
+                    continue;
 
-                if (distanceToTarget < 15f && distanceToShot < 15f)
+                // Closest approach distance between the target and the ray.
+                float perpX = tx - dirX * distanceToTarget;
+                float perpY = ty - dirY * distanceToTarget;
+                float perpZ = tz - dirZ * distanceToTarget;
+                float perpDist = (float)Math.Sqrt(perpX * perpX + perpY * perpY + perpZ * perpZ);
+
+                // Headshot when the ray passes close to the head centre.
+                float hy = (targetPos.y + HEAD_HEIGHT) - shooterPos.y;
+                float headDist = tx * dirX + hy * dirY + tz * dirZ;
+                float headPerpX = tx - dirX * headDist;
+                float headPerpY = hy - dirY * headDist;
+                float headPerpZ = tz - dirZ * headDist;
+                float headPerp = (float)Math.Sqrt(headPerpX * headPerpX + headPerpY * headPerpY + headPerpZ * headPerpZ);
+
+                bool isHeadshot = headPerp <= HEAD_RADIUS;
+                if (perpDist > BODY_RADIUS && !isHeadshot)
+                    continue;
+
                 {
-                    int damage = CalculateDamage(input.weaponId, distanceToTarget, false);
-                    bool isHeadshot = new Random().NextDouble() < 0.1f;
-                    if (isHeadshot) damage *= 2;
+                    int damage = CalculateDamage(input.weaponId, distanceToTarget, isHeadshot);
 
                     var targetState = game.PlayerStates.ContainsKey(target.PlayerId) ?
                         game.PlayerStates[target.PlayerId] : new PlayerStateInfo();
@@ -488,7 +518,12 @@ namespace ServerFpsProjectZero.Server
                 if (game.PlayerStates.ContainsKey(client.PlayerId))
                 {
                     var playerState = game.PlayerStates[client.PlayerId];
-                    playerState.health = state.health;
+
+                    // Health is server-authoritative: it is reduced only by the
+                    // damage handler and reset on respawn. We deliberately do NOT
+                    // overwrite it with the client-reported health, otherwise a
+                    // client that keeps reporting 100 would erase every hit and
+                    // kills could never register.
                     playerState.currentAmmo = state.currentAmmo;
                     playerState.isReloading = state.isReloading;
                     playerState.isCrouching = state.isCrouching;

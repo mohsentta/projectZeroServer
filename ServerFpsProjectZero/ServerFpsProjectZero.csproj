@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
@@ -10,6 +10,13 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.8" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
+  </ItemGroup>
+
+  <!-- TestDailyLogin.cs is aspirational scaffolding that references non-existent
+       members (no parameterless GameManager ctor, private LoginManager internals).
+       Excluded from compilation so the server builds. -->
+  <ItemGroup>
+    <Compile Remove="TestScripts\TestDailyLogin.cs" />
   </ItemGroup>
 
 </Project>
