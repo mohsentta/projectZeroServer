@@ -12,7 +12,6 @@ namespace ServerFpsProjectZero.Matchmaking
     {
         private readonly ConcurrentQueue<QueuedPlayer> queue;
         private readonly Dictionary<int, QueuedPlayer> playerLookup;
-        private readonly List<GameSession> activeGames;
         private readonly Timer matchmakingTimer;
         private bool isRunning;
 
@@ -36,7 +35,6 @@ namespace ServerFpsProjectZero.Matchmaking
         {
             queue = new ConcurrentQueue<QueuedPlayer>();
             playerLookup = new Dictionary<int, QueuedPlayer>();
-            activeGames = new List<GameSession>();
             isRunning = true;
 
             // Start matchmaking timer
@@ -271,7 +269,10 @@ namespace ServerFpsProjectZero.Matchmaking
                 player.IsInGame = true;
             }
 
-            activeGames.Add(gameSession);
+            // NOTE: no longer tracked in an activeGames list. GameManager.GameRoom
+            // is the single authority for the live match and manages its own
+            // lifecycle; keeping a second GameSession list here leaked a session per
+            // match (the list was never read or pruned).
 
             // Calculate average MMR for the game
             float avgMMR = (float)players.Average(p => p.MMR);
