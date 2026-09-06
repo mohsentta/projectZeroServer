@@ -426,46 +426,62 @@ namespace ServerFpsProjectZero.Server
                 {
                     int damage = CalculateDamage(input.weaponId, distanceToTarget, isHeadshot);
 
-                    var targetState = game.PlayerStates.ContainsKey(target.PlayerId) ?
-                        game.PlayerStates[target.PlayerId] : new PlayerStateInfo();
-
-                    targetState.health -= damage;
-                    game.PlayerStates[target.PlayerId] = targetState;
-
-                    var hitData = new HitData
+                    // Serialize the read-modify-write of health/kills/score so two
+                    // concurrent shoot packets cannot lose a decrement or kill credit.
+                    // Network broadcasts happen outside the lock.
+                    bool kill = false;
+                    HitData hitData;
+                    lock (game.StateLock)
                     {
-                        type = "player_hit",
-                        attackerId = client.PlayerId,
-                        attackerName = client.Username,
-                        targetId = target.PlayerId,
-                        targetName = target.Username,
-                        damage = damage,
-                        weaponId = input.weaponId,
-                        hitPoint = targetPos,
-                        hitNormal = new Vector3Data { x = 0, y = 1, z = 0 },
-                        isHeadshot = isHeadshot,
-                        isKill = targetState.health <= 0,
-                        timestamp = DateTime.UtcNow
-                    };
+                        var targetState = game.PlayerStates.TryGetValue(target.PlayerId, out var existing)
+                            ? existing : new PlayerStateInfo();
 
-                    if (targetState.health <= 0)
-                    {
-                        var targetStats = game.PlayerStats[target.PlayerId];
-                        var shooterStats = game.PlayerStats[client.PlayerId];
+                        targetState.health -= damage;
+                        game.PlayerStates[target.PlayerId] = targetState;
 
-                        targetStats.Deaths++;
-                        shooterStats.Kills++;
-                        shooterStats.Score += 100;
-
-                        if (isHeadshot)
+                        hitData = new HitData
                         {
-                            shooterStats.Score += 50;
-                        }
+                            type = "player_hit",
+                            attackerId = client.PlayerId,
+                            attackerName = client.Username,
+                            targetId = target.PlayerId,
+                            targetName = target.Username,
+                            damage = damage,
+                            weaponId = input.weaponId,
+                            hitPoint = targetPos,
+                            hitNormal = new Vector3Data { x = 0, y = 1, z = 0 },
+                            isHeadshot = isHeadshot,
+                            isKill = targetState.health <= 0,
+                            timestamp = DateTime.UtcNow
+                        };
 
-                        if (client.TeamId == 0)
-                            game.RedScore++;
-                        else
-                            game.BlueScore++;
+                        if (targetState.health <= 0)
+                        {
+                            kill = true;
+
+                            var targetStats = game.PlayerStats[target.PlayerId];
+                            var shooterStats = game.PlayerStats[client.PlayerId];
+
+                            targetStats.Deaths++;
+                            shooterStats.Kills++;
+                            shooterStats.Score += 100;
+
+                            if (isHeadshot)
+                            {
+                                shooterStats.Score += 50;
+                            }
+
+                            if (client.TeamId == 0)
+                                game.RedScore++;
+                            else
+                                game.BlueScore++;
+                        }
+                    }
+
+                    if (kill)
+                    {
+                        var shooterStats = game.PlayerStats[client.PlayerId];
+                        var targetStats = game.PlayerStats[target.PlayerId];
 
                         var killData = new KillData
                         {
@@ -951,6 +967,11 @@ namespace ServerFpsProjectZero.Server
         public int RedScore { get; set; }
         public int BlueScore { get; set; }
         public bool IsActive { get; set; }
+        // Guards read-modify-write updates to mutable state (PlayerStateInfo.health,
+        // InGameStats kills/deaths/score, team scores) that are performed by
+        // thread-pool shoot handlers. ConcurrentDictionary protects the collections
+        // themselves; this lock protects the values inside them.
+        public readonly object StateLock = new object();
         // Thread-safety: these dictionaries are read by the game-loop thread
         // (SendGameState/EndGame) while packet handlers running on the thread pool
         // mutate them. Plain Dictionary corrupts or throws under concurrent access;
