@@ -220,6 +220,19 @@ namespace ServerFpsProjectZero.Server
                 if (!game.IsActive)
                     continue;
 
+                // Clean up an abandoned game: if every participant has disconnected,
+                // there is nobody left to receive a result, so drop it immediately
+                // instead of letting it occupy a slot until the timer expires.
+                int connectedPlayers = game.RedTeam.Concat(game.BlueTeam)
+                    .Count(p => p.IsConnected && p.InGame);
+                if (connectedPlayers == 0)
+                {
+                    Console.WriteLine($"[GameManager] Game {game.GameId} removed (all players disconnected)");
+                    game.IsActive = false;
+                    activeGames.TryRemove(game.GameId, out _);
+                    continue;
+                }
+
                 var elapsed = (DateTime.UtcNow - game.StartTime).TotalSeconds;
                 game.TimeRemaining = GAME_DURATION - elapsed;
 
