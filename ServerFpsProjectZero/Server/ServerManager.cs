@@ -1,4 +1,4 @@
-﻿using Newtonsoft.Json;
+using Newtonsoft.Json;
 using ServerFpsProjectZero.Models;
 using ServerFpsProjectZero.Shared;
 using System;
@@ -272,6 +272,20 @@ namespace ServerFpsProjectZero.Server
         {
             if (client == null) return;
 
+            RemoveClientConnection(client);
+
+            OnClientDisconnected?.Invoke(client);
+        }
+
+        /// <summary>
+        /// Removes a client connection from every lookup without firing the
+        /// disconnect event. Used when LoginManager tears a session down directly
+        /// (logout, reconnect-replace) so the event does not recurse back into it.
+        /// </summary>
+        public void RemoveClientConnection(ClientConnection client)
+        {
+            if (client == null) return;
+
             tokenToClient.TryRemove(client.SessionToken, out _);
             clients.TryRemove(client.PlayerId, out _);
             heartbeatMap.TryRemove(client.SessionToken, out _);
@@ -279,8 +293,6 @@ namespace ServerFpsProjectZero.Server
             client.IsConnected = false;
             client.InQueue = false;
             client.InGame = false;
-
-            OnClientDisconnected?.Invoke(client);
         }
 
         public void UpdateHeartbeat(ClientConnection client)

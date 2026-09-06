@@ -899,6 +899,15 @@ namespace ServerFpsProjectZero.Networking
             // Remove from queue if in queue
             matchmakingQueue.RemoveFromQueue(player);
 
+            // Remove the matching ClientConnection from the server manager's
+            // lookups too. Without this, a reconnect (login that replaces an old
+            // session) leaves a stale ClientConnection in heartbeatMap, which later
+            // timeouts out and removes the NEW connection for the same PlayerId.
+            // Use the event-free variant to avoid recursing back into this method.
+            var client = serverManager.GetClientById(player.PlayerId);
+            if (client != null)
+                serverManager.RemoveClientConnection(client);
+
             // Save player data to database before disconnecting
             UpdatePlayerProfile(player);
             UpdatePlayerInventory(player);
