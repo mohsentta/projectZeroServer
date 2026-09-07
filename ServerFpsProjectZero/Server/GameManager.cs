@@ -350,6 +350,14 @@ namespace ServerFpsProjectZero.Server
             if (client == null || !client.InGame)
                 return;
 
+            // Reject non-finite input: a NaN/Infinity position or rotation would
+            // poison the shared game-state dictionaries and corrupt hit detection
+            // for every player in the match.
+            if (input.position == null || input.rotation == null ||
+                !IsFinite(input.position.x, input.position.y, input.position.z) ||
+                !IsFinite(input.rotation.x, input.rotation.y))
+                return;
+
             if (activeGames.TryGetValue(client.CurrentGameId, out var game))
             {
                 game.PlayerPositions[client.PlayerId] = new Vector3Data
@@ -383,6 +391,11 @@ namespace ServerFpsProjectZero.Server
             client.LastShotAt = now;
 
             if (!activeGames.TryGetValue(client.CurrentGameId, out var game))
+                return;
+
+            // Reject non-finite shoot coordinates (see movement handler).
+            if (!IsFinite(input.originX, input.originY, input.originZ) ||
+                !IsFinite(input.targetX, input.targetY, input.targetZ))
                 return;
 
             var shooterPos = new Vector3Data { x = input.originX, y = input.originY, z = input.originZ };
@@ -835,6 +848,17 @@ namespace ServerFpsProjectZero.Server
             float dy = pos1.y - pos2.y;
             float dz = pos1.z - pos2.z;
             return (float)Math.Sqrt(dx * dx + dy * dy + dz * dz);
+        }
+
+        /// <summary>True when every value is a finite number (not NaN/Infinity).</summary>
+        private static bool IsFinite(params float[] values)
+        {
+            foreach (var v in values)
+            {
+                if (float.IsNaN(v) || float.IsInfinity(v))
+                    return false;
+            }
+            return true;
         }
 
         #endregion
