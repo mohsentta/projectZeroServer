@@ -912,5 +912,13 @@ namespace ServerFpsProjectZero.Shared
         public DateTime timestamp;
     }
 
+    [Serializable]
+    public class LobbyErrorData
+    {
+        public string type;          // "lobby_error"
+        public string message;
+        public DateTime timestamp;
+    }
+
     #endregion
 }
