@@ -708,7 +708,7 @@ namespace ServerFpsProjectZero.Networking
             // Send success response
             SendLoginResponse(clientEndpoint, true, player.PlayerId, player.SessionToken, "Login successful");
 
-            Console.WriteLine($"[LoginManager] âœ“ Player '{player.Username}' (ID: {player.PlayerId}, MMR: {player.MMR}) logged in from {clientEndpoint.Address}");
+            Console.WriteLine($"[LoginManager] [OK] Player '{player.Username}' (ID: {player.PlayerId}, MMR: {player.MMR}) logged in from {clientEndpoint.Address}");
 
             OnPlayerLoggedIn?.Invoke(player);
             friendsManager?.UpdatePlayerStatus(player.PlayerId, PlayerStatus.Online);
@@ -791,7 +791,7 @@ namespace ServerFpsProjectZero.Networking
             if (playerId > 0)
             {
                 SendRegisterResponse(clientEndpoint, true, "Registration successful! Please login.");
-                Console.WriteLine($"[LoginManager] âœ“ New player registered: '{registerRequest.username}' (ID: {playerId})");
+                Console.WriteLine($"[LoginManager] [OK] New player registered: '{registerRequest.username}' (ID: {playerId})");
             }
             else
             {
