@@ -94,21 +94,26 @@ namespace ServerFpsProjectZero.Server
 
             var redTeam = new List<ClientConnection>();
             var blueTeam = new List<ClientConnection>();
-            var playerLookup = new Dictionary<int, Player>();
 
             for (int i = 0; i < players.Count; i++)
             {
                 var player = players[i];
-                playerLookup[player.PlayerId] = player;
 
-                // Get or create client connection for each player
-                var client = serverManager.GetClientByToken(player.SessionToken);
+                // Look up the live connection by the stable PlayerId key rather than
+                // the session token: the token is a second source of truth that could
+                // diverge from ServerManager.tokenToClient if a token is ever renewed,
+                // which would silently drop the player from the match.
+                var client = serverManager.GetClientById(player.PlayerId);
                 if (client != null)
                 {
                     if (i % 2 == 0)
                         redTeam.Add(client);
                     else
                         blueTeam.Add(client);
+                }
+                else
+                {
+                    Console.WriteLine($"[GameManager] WARNING: no client connection for matched player {player.Username} (ID {player.PlayerId}); skipping");
                 }
             }
 
