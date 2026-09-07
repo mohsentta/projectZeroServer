@@ -369,6 +369,14 @@ namespace ServerFpsProjectZero.Server
             if (client == null || !client.InGame)
                 return;
 
+            // Anti-spam: the fastest legit weapon (rifle) fires at ~10 shots/s
+            // (0.1s apart). Allow a little margin, then drop anything faster.
+            var now = DateTime.UtcNow;
+            const double MinShotIntervalMs = 60; // ~16 shots/s ceiling
+            if ((now - client.LastShotAt).TotalMilliseconds < MinShotIntervalMs)
+                return;
+            client.LastShotAt = now;
+
             if (!activeGames.TryGetValue(client.CurrentGameId, out var game))
                 return;
 

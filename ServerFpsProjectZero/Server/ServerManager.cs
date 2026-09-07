@@ -410,5 +410,9 @@ namespace ServerFpsProjectZero.Server
         public int CurrentGameId { get; set; }
         public int TeamId { get; set; }
         public bool IsDead { get; set; } = false;
+
+        // Rate limiting: timestamp of the last accepted shoot packet, used to drop
+        // absurdly high-frequency fire (a simple anti-spam guard, not a full ACL).
+        public DateTime LastShotAt { get; set; } = DateTime.MinValue;
     }
 }
