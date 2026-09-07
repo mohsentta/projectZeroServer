@@ -849,4 +849,68 @@ namespace ServerFpsProjectZero.Shared
     }
 
     #endregion
+
+    #region Lobby
+
+    [Serializable]
+    public class CreateLobbyRequest
+    {
+        public string type;
+        public string token;
+    }
+
+    [Serializable]
+    public class JoinLobbyRequest
+    {
+        public string type;
+        public string token;
+        public string lobbyId;
+    }
+
+    [Serializable]
+    public class LeaveLobbyRequest
+    {
+        public string type;
+        public string token;
+        public string lobbyId;
+    }
+
+    [Serializable]
+    public class LobbyReadyRequest
+    {
+        public string type;
+        public string token;
+        public string lobbyId;
+        public bool ready;
+    }
+
+    [Serializable]
+    public class LobbyStartRequest
+    {
+        public string type;
+        public string token;
+        public string lobbyId;
+    }
+
+    [Serializable]
+    public class LobbyMemberInfo
+    {
+        public int playerId;
+        public string username;
+        public bool ready;
+    }
+
+    [Serializable]
+    public class LobbyUpdateData
+    {
+        public string type;          // "lobby_update"
+        public string lobbyId;
+        public int hostPlayerId;
+        public List<LobbyMemberInfo> members;
+        public string status;        // "waiting" | "starting" | "closed"
+        public string message;
+        public DateTime timestamp;
+    }
+
+    #endregion
 }

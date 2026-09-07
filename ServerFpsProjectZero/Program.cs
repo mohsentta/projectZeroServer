@@ -24,6 +24,8 @@ namespace ServerFpsProjectZero
             GameManager gameManager = new GameManager(serverManager);
             LoginManager loginManager = new LoginManager(serverManager, gameManager, connectionString);
             FriendsManager friendsManager = new FriendsManager(connectionString, serverManager, loginManager);
+            LobbyManager lobbyManager = new LobbyManager(serverManager, gameManager);
+            lobbyManager.SetLoginManager(loginManager);
             gameManager.SetLoginManager(loginManager);
 
             // Wire up friends-related packet handlers
@@ -80,6 +82,26 @@ namespace ServerFpsProjectZero
                 catch (Exception ex)
                 {
                     Console.WriteLine($"[Friends] Error processing remove_friend: {ex.Message}");
+                }
+            };
+
+            // Wire up lobby packet handlers
+            serverManager.OnCreateLobbyPacket += (json, endpoint) => lobbyManager.HandleCreateLobby(json, endpoint);
+            serverManager.OnJoinLobbyPacket += (json, endpoint) => lobbyManager.HandleJoinLobby(json, endpoint);
+            serverManager.OnLeaveLobbyPacket += (json, endpoint) => lobbyManager.HandleLeaveLobby(json, endpoint);
+            serverManager.OnLobbyReadyPacket += (json, endpoint) => lobbyManager.HandleLobbyReady(json, endpoint);
+            serverManager.OnLobbyStartPacket += (json, endpoint) => lobbyManager.HandleLobbyStart(json, endpoint);
+
+            // Remove a disconnected player from any lobby they were in.
+            serverManager.OnClientDisconnected += client =>
+            {
+                try
+                {
+                    lobbyManager.OnPlayerDisconnected(client.PlayerId);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[Lobby] Disconnect cleanup error: {ex.Message}");
                 }
             };
 

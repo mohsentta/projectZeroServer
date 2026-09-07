@@ -55,6 +55,12 @@ namespace ServerFpsProjectZero.Server
         public event Action<string, IPEndPoint> OnSendFriendRequestPacket;
         public event Action<string, IPEndPoint> OnRespondFriendRequestPacket;
         public event Action<string, IPEndPoint> OnRemoveFriendPacket;
+        //lobby events:
+        public event Action<string, IPEndPoint> OnCreateLobbyPacket;
+        public event Action<string, IPEndPoint> OnJoinLobbyPacket;
+        public event Action<string, IPEndPoint> OnLeaveLobbyPacket;
+        public event Action<string, IPEndPoint> OnLobbyReadyPacket;
+        public event Action<string, IPEndPoint> OnLobbyStartPacket;
 
 
         public ServerManager(int port = 7777)
@@ -211,6 +217,21 @@ namespace ServerFpsProjectZero.Server
                         break;
                     case "remove_friend":
                         OnRemoveFriendPacket?.Invoke(jsonData, remoteEndpoint);
+                        break;
+                    case "create_lobby":
+                        OnCreateLobbyPacket?.Invoke(jsonData, remoteEndpoint);
+                        break;
+                    case "join_lobby":
+                        OnJoinLobbyPacket?.Invoke(jsonData, remoteEndpoint);
+                        break;
+                    case "leave_lobby":
+                        OnLeaveLobbyPacket?.Invoke(jsonData, remoteEndpoint);
+                        break;
+                    case "lobby_ready":
+                        OnLobbyReadyPacket?.Invoke(jsonData, remoteEndpoint);
+                        break;
+                    case "lobby_start":
+                        OnLobbyStartPacket?.Invoke(jsonData, remoteEndpoint);
                         break;
                     default:
                         Console.WriteLine($"[ServerManager] Unknown packet type: {type}");
