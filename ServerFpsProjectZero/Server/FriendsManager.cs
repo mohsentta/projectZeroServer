@@ -1,4 +1,4 @@
-﻿using Microsoft.Data.Sqlite;
+using Microsoft.Data.Sqlite;
 using Newtonsoft.Json;
 using ServerFpsProjectZero.Models;
 using ServerFpsProjectZero.Networking;
@@ -178,6 +178,40 @@ namespace ServerFpsProjectZero.Server
                 var command = connection.CreateCommand();
                 command.CommandText = "SELECT COUNT(*) FROM Friends";
                 return Convert.ToInt32(command.ExecuteScalar());
+            }
+        }
+
+        /// <summary>
+        /// True when the two players are friends in either direction. Used to gate party
+        /// invites so a lobby cannot be joined by a stranger who guessed or scraped a code.
+        /// </summary>
+        public bool AreFriends(int playerId, int otherPlayerId)
+        {
+            if (playerId == otherPlayerId) return true;
+
+            try
+            {
+                using (var connection = new SqliteConnection(connectionString))
+                {
+                    connection.Open();
+
+                    string query = @"
+                        SELECT COUNT(*) FROM Friends
+                        WHERE (PlayerId = @a AND FriendId = @b)
+                           OR (PlayerId = @b AND FriendId = @a)";
+
+                    using (var command = new SqliteCommand(query, connection))
+                    {
+                        command.Parameters.AddWithValue("@a", playerId);
+                        command.Parameters.AddWithValue("@b", otherPlayerId);
+                        return Convert.ToInt32(command.ExecuteScalar()) > 0;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[FriendsManager] AreFriends check failed: {ex.Message}");
+                return false;
             }
         }
 

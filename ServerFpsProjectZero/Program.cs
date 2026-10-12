@@ -26,6 +26,7 @@ namespace ServerFpsProjectZero
             FriendsManager friendsManager = new FriendsManager(connectionString, serverManager, loginManager);
             LobbyManager lobbyManager = new LobbyManager(serverManager, gameManager);
             lobbyManager.SetLoginManager(loginManager);
+            lobbyManager.SetFriendsManager(friendsManager);
             gameManager.SetLoginManager(loginManager);
 
             // Wire up friends-related packet handlers
@@ -92,6 +93,8 @@ namespace ServerFpsProjectZero
             serverManager.OnLobbyReadyPacket += (json, endpoint) => lobbyManager.HandleLobbyReady(json, endpoint);
             serverManager.OnLobbyStartPacket += (json, endpoint) => lobbyManager.HandleLobbyStart(json, endpoint);
             serverManager.OnLobbySyncPacket += (json, endpoint) => lobbyManager.HandleLobbySync(json, endpoint);
+            serverManager.OnLobbyInvitePacket += (json, endpoint) => lobbyManager.HandleLobbyInvite(json, endpoint);
+            serverManager.OnLobbyInviteRespondPacket += (json, endpoint) => lobbyManager.HandleLobbyInviteRespond(json, endpoint);
 
             // Remove a disconnected player from any lobby they were in.
             serverManager.OnClientDisconnected += client =>

@@ -899,6 +899,68 @@ namespace ServerFpsProjectZero.Shared
         public string token;
     }
 
+    /// <summary>Asks the server to invite a specific friend into the caller's lobby.</summary>
+    [Serializable]
+    public class LobbyInviteRequest
+    {
+        public string type;          // "lobby_invite"
+        public string token;
+        public int targetPlayerId;
+    }
+
+    /// <summary>Accept or decline an invite this player received.</summary>
+    [Serializable]
+    public class LobbyInviteRespondRequest
+    {
+        public string type;          // "lobby_invite_respond"
+        public string token;
+        public int fromPlayerId;     // who sent the invite
+        public bool accept;
+    }
+
+    /// <summary>
+    /// Delivered to the invited player. Carries enough context to show who is asking and
+    /// which lobby they would be joining, so accepting needs no extra round trip.
+    /// </summary>
+    [Serializable]
+    public class LobbyInviteNotification
+    {
+        public string type;          // "lobby_invite_notification"
+        public string lobbyId;
+        public int fromPlayerId;
+        public string fromUsername;
+        public int memberCount;
+        public int maxPlayers;
+        public DateTime timestamp;
+    }
+
+    /// <summary>
+    /// Result of an invite attempt, sent back to the inviter so the friends panel can
+    /// report "invite sent", "they are offline", "lobby is full" and so on.
+    /// </summary>
+    [Serializable]
+    public class LobbyInviteResult
+    {
+        public string type;          // "lobby_invite_result"
+        public bool success;
+        public int targetPlayerId;
+        public string targetUsername;
+        public string message;
+        public DateTime timestamp;
+    }
+
+    /// <summary>Tells the inviter that their invite was accepted, declined or expired.</summary>
+    [Serializable]
+    public class LobbyInviteUpdate
+    {
+        public string type;          // "lobby_invite_update"
+        public int otherPlayerId;
+        public string otherUsername;
+        public string state;         // "accepted" | "declined" | "expired"
+        public string message;
+        public DateTime timestamp;
+    }
+
     [Serializable]
     public class LobbyMemberInfo
     {
