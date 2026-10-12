@@ -91,6 +91,7 @@ namespace ServerFpsProjectZero
             serverManager.OnLeaveLobbyPacket += (json, endpoint) => lobbyManager.HandleLeaveLobby(json, endpoint);
             serverManager.OnLobbyReadyPacket += (json, endpoint) => lobbyManager.HandleLobbyReady(json, endpoint);
             serverManager.OnLobbyStartPacket += (json, endpoint) => lobbyManager.HandleLobbyStart(json, endpoint);
+            serverManager.OnLobbySyncPacket += (json, endpoint) => lobbyManager.HandleLobbySync(json, endpoint);
 
             // Remove a disconnected player from any lobby they were in.
             serverManager.OnClientDisconnected += client =>

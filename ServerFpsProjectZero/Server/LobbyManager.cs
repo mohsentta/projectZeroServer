@@ -132,6 +132,32 @@ namespace ServerFpsProjectZero.Server
             RemovePlayerFromLobby(player, lobby, left: true);
         }
 
+        /// <summary>
+        /// Reports the caller's current lobby back to them, or an error when they are in none.
+        ///
+        /// The transport is UDP, so a create/join response can be lost even though the
+        /// server applied it. Without a way to ask "what lobby am I in?", the client would
+        /// be left believing it has no lobby while the server holds it in one. This lets the
+        /// client reconcile after a missing acknowledgement instead of retrying blindly.
+        /// </summary>
+        public void HandleLobbySync(string jsonData, IPEndPoint endpoint)
+        {
+            var req = Deserialize<LobbySyncRequest>(jsonData, endpoint);
+            if (req == null) return;
+
+            var player = ResolvePlayer(req.token, endpoint);
+            if (player == null) return;
+
+            var lobby = GetLobbyForPlayer(player.PlayerId);
+            if (lobby == null)
+            {
+                SendLobbyError(endpoint, "You are not in a lobby");
+                return;
+            }
+
+            serverManager.SendPacket(BuildUpdate(lobby), endpoint);
+        }
+
         public void HandleLobbyReady(string jsonData, IPEndPoint endpoint)
         {
             var req = Deserialize<LobbyReadyRequest>(jsonData, endpoint);

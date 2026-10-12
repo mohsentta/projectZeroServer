@@ -61,6 +61,7 @@ namespace ServerFpsProjectZero.Server
         public event Action<string, IPEndPoint> OnLeaveLobbyPacket;
         public event Action<string, IPEndPoint> OnLobbyReadyPacket;
         public event Action<string, IPEndPoint> OnLobbyStartPacket;
+        public event Action<string, IPEndPoint> OnLobbySyncPacket;
 
 
         public ServerManager(int port = 7777)
@@ -232,6 +233,9 @@ namespace ServerFpsProjectZero.Server
                         break;
                     case "lobby_start":
                         OnLobbyStartPacket?.Invoke(jsonData, remoteEndpoint);
+                        break;
+                    case "lobby_sync":
+                        OnLobbySyncPacket?.Invoke(jsonData, remoteEndpoint);
                         break;
                     default:
                         Console.WriteLine($"[ServerManager] Unknown packet type: {type}");

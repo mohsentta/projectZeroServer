@@ -893,6 +893,13 @@ namespace ServerFpsProjectZero.Shared
     }
 
     [Serializable]
+    public class LobbySyncRequest
+    {
+        public string type;          // "lobby_sync"
+        public string token;
+    }
+
+    [Serializable]
     public class LobbyMemberInfo
     {
         public int playerId;
