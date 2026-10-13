@@ -6,11 +6,36 @@ namespace ServerFpsProjectZero
 {
     class Program
     {
+        /// <summary>
+        /// Server build version. BUMP THIS ON EVERY SERVER CHANGE.
+        ///
+        /// It is printed in the startup banner so any log immediately shows which build is
+        /// running. This exists because a stale server binary silently wasted several rounds:
+        /// the client was sending correctly while an older server ignored the packet, and
+        /// nothing in the output revealed it.
+        /// </summary>
+        public const string ServerVersion = "0.1.1";
+
+        /// <summary>Assembly build time, so two builds of the same version are still distinguishable.</summary>
+        static string BuildStamp()
+        {
+            try
+            {
+                var path = System.Reflection.Assembly.GetExecutingAssembly().Location;
+                return System.IO.File.GetLastWriteTime(path).ToString("yyyy-MM-dd HH:mm:ss");
+            }
+            catch
+            {
+                return "unknown";
+            }
+        }
+
         static void Main(string[] args)
         {
             Console.Title = "FPS Game Server";
             Console.WriteLine("========================================");
-            Console.WriteLine("  FPS Game Server Starting...");
+            Console.WriteLine($"  FPS Game Server  v{ServerVersion}");
+            Console.WriteLine($"  build {BuildStamp()}");
             Console.WriteLine("========================================\n");
 
             // Database connection string
@@ -26,6 +51,11 @@ namespace ServerFpsProjectZero
             // "shootdebug" console command toggles them at runtime.
             if (Array.Exists(args, a => string.Equals(a, "--no-shootdebug", StringComparison.OrdinalIgnoreCase)))
                 gameManager.ShootDebug = false;
+
+            // Packet trace defaults to ON so we can confirm what the server actually receives.
+            // "--no-packettrace" silences it.
+            if (Array.Exists(args, a => string.Equals(a, "--no-packettrace", StringComparison.OrdinalIgnoreCase)))
+                serverManager.TracePackets = false;
             LoginManager loginManager = new LoginManager(serverManager, gameManager, connectionString);
             FriendsManager friendsManager = new FriendsManager(connectionString, serverManager, loginManager);
             LobbyManager lobbyManager = new LobbyManager(serverManager, gameManager);

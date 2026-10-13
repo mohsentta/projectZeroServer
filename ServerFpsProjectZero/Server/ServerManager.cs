@@ -21,6 +21,15 @@ namespace ServerFpsProjectZero.Server
         private int port;
         private Timer heartbeatCleanupTimer;
 
+        /// <summary>
+        /// When true, every packet type the server receives is logged. Defaults on so a client
+        /// that claims to have sent something can be checked against what actually arrived.
+        /// </summary>
+        public bool TracePackets { get; set; } = true;
+
+        /// <summary>Unique marker so a build can be proven to include this file.</summary>
+        public const string PacketTraceMarker = "PACKET_TRACE_V2_MARKER";
+
         // Client connections
         private ConcurrentDictionary<int, ClientConnection> clients;
         private ConcurrentDictionary<string, ClientConnection> tokenToClient;
@@ -154,6 +163,12 @@ namespace ServerFpsProjectZero.Server
                 }
 
                 string type = packet["type"].ToString();
+
+                // Packet trace: prints every packet type the server actually receives. This is
+                // the ground truth for "the client says it sent it but the server never reacts",
+                // and it also flags types the dispatch switch does not handle at all.
+                if (TracePackets)
+                    Console.WriteLine($"[Packet] recv '{type}' from {remoteEndpoint}");
 
                 switch (type)
                 {
