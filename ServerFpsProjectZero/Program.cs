@@ -14,7 +14,7 @@ namespace ServerFpsProjectZero
         /// the client was sending correctly while an older server ignored the packet, and
         /// nothing in the output revealed it.
         /// </summary>
-        public const string ServerVersion = "0.1.3";
+        public const string ServerVersion = "0.2.0";
 
         /// <summary>Assembly build time, so two builds of the same version are still distinguishable.</summary>
         static string BuildStamp()

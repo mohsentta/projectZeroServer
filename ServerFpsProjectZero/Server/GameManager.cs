@@ -32,6 +32,14 @@ namespace ServerFpsProjectZero.Server
         private const float GAME_DURATION = 600f;
         private const int MinPlayersPerGame = 2;
 
+        /// <summary>
+        /// Height above the character root (the feet) that counts as the head, and how far the
+        /// reported impact point may sit from it and still count as a headshot. Headshots are
+        /// positional now that hit resolution is target-by-id rather than a ray test.
+        /// </summary>
+        private const float HEAD_HEIGHT = 1.6f;
+        private const float HEADSHOT_TOLERANCE = 0.35f;
+
         public GameManager(ServerManager serverManager)
         {
             this.serverManager = serverManager;
@@ -426,258 +434,183 @@ namespace ServerFpsProjectZero.Server
                 !IsFinite(input.targetX, input.targetY, input.targetZ))
                 return;
 
-            var shooterPos = new Vector3Data { x = input.originX, y = input.originY, z = input.originZ };
-            var aimPos = new Vector3Data { x = input.targetX, y = input.targetY, z = input.targetZ };
-
-            // Server-side shot check: cast the shot ray and test each enemy's
-            // last-known position against it. Replaces the old point-blank
-            // "both within 15 units" sphere, which made ranged fire impossible.
-            float sdx = aimPos.x - shooterPos.x, sdy = aimPos.y - shooterPos.y, sdz = aimPos.z - shooterPos.z;
-            float sLen = (float)Math.Sqrt(sdx * sdx + sdy * sdy + sdz * sdz);
-            float dirX = sLen > 0.0001f ? sdx / sLen : 0f;
-            float dirY = sLen > 0.0001f ? sdy / sLen : 0f;
-            float dirZ = sLen > 0.0001f ? sdz / sLen : 1f;
-
-            // The reported position is the character root, i.e. the feet. The hit volume is a
-            // vertical capsule from feet to head rather than a sphere centred on the feet:
-            // with a feet-centred sphere the client (which shoots from its camera at eye
-            // height) had to aim at the legs to register anything, and every shot at the
-            // chest or head passed above the volume.
-            const float BODY_RADIUS = 0.45f;
-            const float PLAYER_HEIGHT = 1.8f;
-            const float HEAD_HEIGHT = 1.6f;
-            const float HEAD_RADIUS = 0.32f;
-            const float MAX_RANGE = 200f;
-
-            // Position dump: everything the server knows about this shot, before any hit test.
-            // The shooter line shows the client's own reported ray against the position the
-            // server holds for the shooter; each enemy line shows where the client aimed
-            // against where the server thinks that enemy is, and the gap between them.
-            if (ShootDebug)
+            // Line of sight comes from the client: hitPlayerId is the player its raycast struck,
+            // or -1. The client's ray is real physics and stops on walls, so an enemy behind
+            // cover reports -1 and no damage is applied. The server holds no map geometry, so
+            // this is the one fact it delegates - everything else below is enforced here.
+            //
+            // No geometric ray test is performed. It would add nothing: it tests against
+            // last-known positions and has no concept of walls, so it would pass a through-wall
+            // shot. The ray-vs-capsule hit test that used to live here has been removed.
+            if (input.hitPlayerId < 0)
             {
-                Console.WriteLine($"[Shoot] --- shot by {client.Username} (player {client.PlayerId}) ---");
-                Console.WriteLine($"[Shoot]   client reported ray: origin=({input.originX:0.###},{input.originY:0.###},{input.originZ:0.###}) " +
-                                  $"target=({input.targetX:0.###},{input.targetY:0.###},{input.targetZ:0.###})");
+                if (ShootDebug)
+                    Console.WriteLine($"[Shoot] no player hit (hitPlayerId={input.hitPlayerId}) " +
+                                      $"- no damage. A wall between shooter and target reports -1 here.");
 
-                if (game.PlayerPositions.TryGetValue(client.PlayerId, out var shooterServerPos))
+                return;
+            }
+
+            if (input.hitPlayerId == client.PlayerId)
+            {
+                if (ShootDebug)
+                    Console.WriteLine($"[Shoot] ignored: {client.Username} named themselves as the target");
+
+                return;
+            }
+
+            // Find the named participant in this match.
+            ClientConnection target = null;
+            foreach (var candidate in game.RedTeam.Concat(game.BlueTeam))
+            {
+                if (candidate.PlayerId == input.hitPlayerId)
                 {
-                    float gapX = input.originX - shooterServerPos.x;
-                    float gapY = input.originY - shooterServerPos.y;
-                    float gapZ = input.originZ - shooterServerPos.z;
-                    float shooterGap = (float)Math.Sqrt(gapX * gapX + gapY * gapY + gapZ * gapZ);
-
-                    Console.WriteLine($"[Shoot]   server holds {client.Username} at " +
-                                      $"({shooterServerPos.x:0.###},{shooterServerPos.y:0.###},{shooterServerPos.z:0.###}) " +
-                                      $"- shooter gap {shooterGap:0.###}m");
-                }
-                else
-                {
-                    Console.WriteLine($"[Shoot]   server has NO position for {client.Username} " +
-                                      $"(player {client.PlayerId}) - movement never arrived");
-                }
-
-                foreach (var t in game.RedTeam.Concat(game.BlueTeam))
-                {
-                    if (t.PlayerId == client.PlayerId) continue;
-
-                    string side = t.TeamId == client.TeamId ? "SAME TEAM (skipped)" : "enemy";
-
-                    if (game.PlayerPositions.TryGetValue(t.PlayerId, out var p))
-                    {
-                        Console.WriteLine($"[Shoot]   server holds {t.Username} (player {t.PlayerId}, {side}) at " +
-                                          $"({p.x:0.###},{p.y:0.###},{p.z:0.###})");
-                    }
-                    else
-                    {
-                        Console.WriteLine($"[Shoot]   server has NO position for {t.Username} " +
-                                          $"(player {t.PlayerId}, {side})");
-                    }
+                    target = candidate;
+                    break;
                 }
             }
 
-            foreach (var target in game.RedTeam.Concat(game.BlueTeam))
+            if (target == null)
             {
-                if (target.PlayerId == client.PlayerId || target.TeamId == client.TeamId)
-                    continue;
-
-                if (!game.PlayerPositions.ContainsKey(target.PlayerId))
-                {
-                    // The server cannot test a target it has never been told about, so this
-                    // looks identical to a miss from the client's side.
-                    if (ShootDebug)
-                        Console.WriteLine($"[Shoot]   no known position for {target.Username} " +
-                                          $"(player {target.PlayerId}) - movement never arrived, skipping");
-
-                    continue;
-                }
-
-                var targetPos = game.PlayerPositions[target.PlayerId];
-
-                // Closest approach between the shot ray and the target's vertical capsule axis.
-                float ax = targetPos.x, ay = targetPos.y, az = targetPos.z;          // feet
-                float bx = targetPos.x, by = targetPos.y + PLAYER_HEIGHT, bz = targetPos.z; // head
-
-                float abx = bx - ax, aby = by - ay, abz = bz - az;
-                float apx = shooterPos.x - ax, apy = shooterPos.y - ay, apz = shooterPos.z - az;
-
-                float abLenSq = abx * abx + aby * aby + abz * abz;
-                float abDotDir = abx * dirX + aby * dirY + abz * dirZ;
-                float abDotAp = abx * apx + aby * apy + abz * apz;
-                float dirDotAp = dirX * apx + dirY * apy + dirZ * apz;
-                float apLenSq = apx * apx + apy * apy + apz * apz;
-
-                // Solve for the ray parameter t and capsule parameter s that minimise distance.
-                // From  C = A + t*D - (P + s*AB),  requiring dC/dt = dC/ds = 0:
-                //   t = (abDotDir * abDotAp - abLenSq * dirDotAp) / (abLenSq - abDotDir^2)
-                float denom = abLenSq - abDotDir * abDotDir;
-                float t, s;
-                if (denom > 0.0001f)
-                    t = (abDotDir * abDotAp - abLenSq * dirDotAp) / denom;
-                else
-                    t = -dirDotAp;   // capsule is parallel to the ray
-
-                if (t < 0f) t = 0f;
-                if (t > MAX_RANGE) continue;
-
-                s = abDotAp + t * abDotDir;
-                if (s < 0f) s = 0f;
-                else if (s > abLenSq) s = abLenSq;
-
-                // Closest point on the capsule axis, and its distance to the ray.
-                float cx = ax + abx * (abLenSq > 0.0001f ? s / abLenSq : 0f);
-                float cy = ay + aby * (abLenSq > 0.0001f ? s / abLenSq : 0f);
-                float cz = az + abz * (abLenSq > 0.0001f ? s / abLenSq : 0f);
-
-                float ex = shooterPos.x + dirX * t - cx;
-                float ey = shooterPos.y + dirY * t - cy;
-                float ez = shooterPos.z + dirZ * t - cz;
-                float perpDist = (float)Math.Sqrt(ex * ex + ey * ey + ez * ez);
-
-                // Distance along the ray to the impact, used for damage falloff.
-                float distanceToTarget = t;
-
-                // Headshot when the impact lands near the head sphere rather than the body.
-                float headCentreY = targetPos.y + HEAD_HEIGHT;
-                float hx = shooterPos.x + dirX * t - targetPos.x;
-                float hy = shooterPos.y + dirY * t - headCentreY;
-                float hz = shooterPos.z + dirZ * t - targetPos.z;
-                float headPerp = (float)Math.Sqrt(hx * hx + hy * hy + hz * hz);
-
-                bool isHeadshot = headPerp <= HEAD_RADIUS;
-
-                // Diagnostic: shows exactly why a shot was accepted or rejected. Enabled via
-                // the "shootdebug" console command.
                 if (ShootDebug)
+                    Console.WriteLine($"[Shoot] ignored: player {input.hitPlayerId} is not in game " +
+                                      $"{game.GameId} (forged or stale id)");
+
+                return;
+            }
+
+            if (target.TeamId == client.TeamId)
+            {
+                if (ShootDebug)
+                    Console.WriteLine($"[Shoot] ignored: {target.Username} is on the shooter's own team");
+
+                return;
+            }
+
+            if (target.IsDead)
+            {
+                if (ShootDebug)
+                    Console.WriteLine($"[Shoot] ignored: {target.Username} is already dead");
+
+                return;
+            }
+
+            // Range gates damage falloff, and rejects a client naming a target on the far side
+            // of the map. Falls back to the reported target point when no position is known.
+            var targetPos = game.PlayerPositions.TryGetValue(target.PlayerId, out var tp)
+                ? tp
+                : new Vector3Data { x = input.targetX, y = input.targetY, z = input.targetZ };
+
+            float ddx = targetPos.x - input.originX;
+            float ddy = targetPos.y - input.originY;
+            float ddz = targetPos.z - input.originZ;
+            float distanceToTarget = (float)Math.Sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
+
+            const float MAX_RANGE = 200f;
+            if (distanceToTarget > MAX_RANGE)
+            {
+                if (ShootDebug)
+                    Console.WriteLine($"[Shoot] ignored: target {target.Username} is " +
+                                      $"{distanceToTarget:0.#}m away (max {MAX_RANGE})");
+
+                return;
+            }
+
+            // Headshot is positional: the reported impact point near the target's head height.
+            float headHeight = targetPos.y + HEAD_HEIGHT;
+            bool isHeadshot = Math.Abs(input.targetY - headHeight) <= HEADSHOT_TOLERANCE;
+
+            if (ShootDebug)
+            {
+                Console.WriteLine($"[Shoot] {client.Username} hit {target.Username} " +
+                                  $"(player {target.PlayerId}): distance={distanceToTarget:0.##}m " +
+                                  $"headshot={isHeadshot} weapon={input.weaponId}");
+            }
+
+            {
+                int damage = CalculateDamage(input.weaponId, distanceToTarget, isHeadshot);
+
+                // Serialize the read-modify-write of health/kills/score so two
+                // concurrent shoot packets cannot lose a decrement or kill credit.
+                // Network broadcasts happen outside the lock.
+                bool kill = false;
+                HitData hitData;
+                lock (game.StateLock)
                 {
-                    // The client aims at a point on the enemy model it can see. The server tests
-                    // that ray against the position it was TOLD for that player.
-                    float gapX = aimPos.x - targetPos.x;
-                    float gapY = aimPos.y - targetPos.y;
-                    float gapZ = aimPos.z - targetPos.z;
-                    float gap = (float)Math.Sqrt(gapX * gapX + gapY * gapY + gapZ * gapZ);
+                    var targetState = game.PlayerStates.TryGetValue(target.PlayerId, out var existing)
+                        ? existing : new PlayerStateInfo();
 
-                    Console.WriteLine($"[Shoot]   vs {target.Username}: clientAim=" +
-                                      $"({aimPos.x:0.###},{aimPos.y:0.###},{aimPos.z:0.###}) " +
-                                      $"serverAt=({targetPos.x:0.###},{targetPos.y:0.###},{targetPos.z:0.###}) " +
-                                      $"gap={gap:0.###}m");
+                    targetState.health -= damage;
+                    game.PlayerStates[target.PlayerId] = targetState;
 
-                    // Would this shot hit if the server's position were the one the client
-                    // aimed at? Distinguishing that from a genuine miss tells us whether the
-                    // problem is the hit volume or a stale position.
-                    Console.WriteLine($"[Shoot]     ray: t={t:0.###} perpDist={perpDist:0.###} " +
-                                      $"(max {BODY_RADIUS}) headPerp={headPerp:0.###} (max {HEAD_RADIUS}) " +
-                                      $"-> {(perpDist <= BODY_RADIUS || isHeadshot ? "HIT" : "miss")}");
-                }
-
-                if (perpDist > BODY_RADIUS && !isHeadshot)
-                    continue;
-
-                {
-                    int damage = CalculateDamage(input.weaponId, distanceToTarget, isHeadshot);
-
-                    // Serialize the read-modify-write of health/kills/score so two
-                    // concurrent shoot packets cannot lose a decrement or kill credit.
-                    // Network broadcasts happen outside the lock.
-                    bool kill = false;
-                    HitData hitData;
-                    lock (game.StateLock)
+                    hitData = new HitData
                     {
-                        var targetState = game.PlayerStates.TryGetValue(target.PlayerId, out var existing)
-                            ? existing : new PlayerStateInfo();
+                        type = "player_hit",
+                        attackerId = client.PlayerId,
+                        attackerName = client.Username,
+                        targetId = target.PlayerId,
+                        targetName = target.Username,
+                        damage = damage,
+                        weaponId = input.weaponId,
+                        hitPoint = targetPos,
+                        hitNormal = new Vector3Data { x = 0, y = 1, z = 0 },
+                        isHeadshot = isHeadshot,
+                        isKill = targetState.health <= 0,
+                        timestamp = DateTime.UtcNow
+                    };
 
-                        targetState.health -= damage;
-                        game.PlayerStates[target.PlayerId] = targetState;
-
-                        hitData = new HitData
-                        {
-                            type = "player_hit",
-                            attackerId = client.PlayerId,
-                            attackerName = client.Username,
-                            targetId = target.PlayerId,
-                            targetName = target.Username,
-                            damage = damage,
-                            weaponId = input.weaponId,
-                            hitPoint = targetPos,
-                            hitNormal = new Vector3Data { x = 0, y = 1, z = 0 },
-                            isHeadshot = isHeadshot,
-                            isKill = targetState.health <= 0,
-                            timestamp = DateTime.UtcNow
-                        };
-
-                        if (targetState.health <= 0)
-                        {
-                            kill = true;
-
-                            var targetStats = game.PlayerStats[target.PlayerId];
-                            var shooterStats = game.PlayerStats[client.PlayerId];
-
-                            targetStats.Deaths++;
-                            shooterStats.Kills++;
-                            shooterStats.Score += 100;
-
-                            if (isHeadshot)
-                            {
-                                shooterStats.Score += 50;
-                            }
-
-                            if (client.TeamId == 0)
-                                game.RedScore++;
-                            else
-                                game.BlueScore++;
-                        }
-                    }
-
-                    if (kill)
+                    if (targetState.health <= 0)
                     {
-                        var shooterStats = game.PlayerStats[client.PlayerId];
+                        kill = true;
+
                         var targetStats = game.PlayerStats[target.PlayerId];
+                        var shooterStats = game.PlayerStats[client.PlayerId];
 
-                        var killData = new KillData
+                        targetStats.Deaths++;
+                        shooterStats.Kills++;
+                        shooterStats.Score += 100;
+
+                        if (isHeadshot)
                         {
-                            type = "player_killed",
-                            killerId = client.PlayerId,
-                            killerName = client.Username,
-                            victimId = target.PlayerId,
-                            victimName = target.Username,
-                            weaponId = input.weaponId,
-                            isHeadshot = isHeadshot,
-                            killerTeamId = client.TeamId,
-                            victimTeamId = target.TeamId,
-                            killerScore = shooterStats.Score,
-                            victimScore = targetStats.Score,
-                            timestamp = DateTime.UtcNow
-                        };
+                            shooterStats.Score += 50;
+                        }
 
-                        BroadcastToGame(game, killData);
-
-                        Console.WriteLine($"[GameManager] {client.Username} killed {target.Username}! Score: {game.RedScore}-{game.BlueScore}");
-
-                        HandlePlayerDeath(target, game);
+                        if (client.TeamId == 0)
+                            game.RedScore++;
+                        else
+                            game.BlueScore++;
                     }
-
-                    BroadcastToGame(game, hitData);
-                    break;
                 }
+
+                if (kill)
+                {
+                    var shooterStats = game.PlayerStats[client.PlayerId];
+                    var targetStats = game.PlayerStats[target.PlayerId];
+
+                    var killData = new KillData
+                    {
+                        type = "player_killed",
+                        killerId = client.PlayerId,
+                        killerName = client.Username,
+                        victimId = target.PlayerId,
+                        victimName = target.Username,
+                        weaponId = input.weaponId,
+                        isHeadshot = isHeadshot,
+                        killerTeamId = client.TeamId,
+                        victimTeamId = target.TeamId,
+                        killerScore = shooterStats.Score,
+                        victimScore = targetStats.Score,
+                        timestamp = DateTime.UtcNow
+                    };
+
+                    BroadcastToGame(game, killData);
+
+                    Console.WriteLine($"[GameManager] {client.Username} killed {target.Username}! Score: {game.RedScore}-{game.BlueScore}");
+
+                    HandlePlayerDeath(target, game);
+                }
+
+                BroadcastToGame(game, hitData);
             }
         }
 

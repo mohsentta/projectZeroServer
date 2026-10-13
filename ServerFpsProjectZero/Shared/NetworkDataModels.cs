@@ -484,6 +484,21 @@ namespace ServerFpsProjectZero.Shared
         public float targetY;
         public float targetZ;
         public int weaponId;
+
+        /// <summary>
+        /// The player the shooter's own raycast struck, or -1 for no player.
+        ///
+        /// This is how line of sight is communicated. The server holds no map geometry, so it
+        /// cannot tell a wall from a clear shot; the client can, because its raycast is real
+        /// physics and stops on geometry. If an enemy is behind a wall the ray hits the wall,
+        /// this stays -1, and the server applies no damage - the wall case is handled by
+        /// omission rather than by a lookup.
+        ///
+        /// Everything else stays server-authoritative: the server still checks that the id is
+        /// a real participant, not the shooter, not a teammate, alive, and within range.
+        /// </summary>
+        public int hitPlayerId = -1;
+
         public DateTime timestamp;
     }
 
