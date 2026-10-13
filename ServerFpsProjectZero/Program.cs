@@ -14,7 +14,7 @@ namespace ServerFpsProjectZero
         /// the client was sending correctly while an older server ignored the packet, and
         /// nothing in the output revealed it.
         /// </summary>
-        public const string ServerVersion = "0.1.2";
+        public const string ServerVersion = "0.1.3";
 
         /// <summary>Assembly build time, so two builds of the same version are still distinguishable.</summary>
         static string BuildStamp()
@@ -52,14 +52,17 @@ namespace ServerFpsProjectZero
             if (Array.Exists(args, a => string.Equals(a, "--no-shootdebug", StringComparison.OrdinalIgnoreCase)))
                 gameManager.ShootDebug = false;
 
-            // Packet trace: movement and shooting are logged by default.
-            //   --no-packettrace   silence the trace completely
-            //   --packettrace-all  log every packet type, not just movement/shooting
-            if (Array.Exists(args, a => string.Equals(a, "--no-packettrace", StringComparison.OrdinalIgnoreCase)))
-                serverManager.TracePackets = false;
+            // Packet trace is OFF by default (movement arrives at 20Hz and floods the console).
+            //   --packettrace      log shoot packets
+            //   --packettrace-all  log every packet type, movement included
+            if (Array.Exists(args, a => string.Equals(a, "--packettrace", StringComparison.OrdinalIgnoreCase)))
+                serverManager.TracePackets = true;
 
             if (Array.Exists(args, a => string.Equals(a, "--packettrace-all", StringComparison.OrdinalIgnoreCase)))
+            {
+                serverManager.TracePackets = true;
                 serverManager.TraceAllPackets = true;
+            }
             LoginManager loginManager = new LoginManager(serverManager, gameManager, connectionString);
             FriendsManager friendsManager = new FriendsManager(connectionString, serverManager, loginManager);
             LobbyManager lobbyManager = new LobbyManager(serverManager, gameManager);

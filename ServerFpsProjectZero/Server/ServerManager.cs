@@ -22,12 +22,13 @@ namespace ServerFpsProjectZero.Server
         private Timer heartbeatCleanupTimer;
 
         /// <summary>
-        /// When true, the packet trace is active. Defaults on, but only movement and shooting
-        /// are logged unless <see cref="TraceAllPackets"/> is also set.
+        /// When true, the packet trace logs shooting (and everything else if
+        /// <see cref="TraceAllPackets"/> is set). OFF by default: movement arrives at 20Hz per
+        /// player and drowns the console, so it is opt-in via --packettrace.
         /// </summary>
-        public bool TracePackets { get; set; } = true;
+        public bool TracePackets { get; set; } = false;
 
-        /// <summary>When true, every packet type is logged rather than just movement/shooting.</summary>
+        /// <summary>When true, every packet type is logged rather than just shooting.</summary>
         public bool TraceAllPackets { get; set; } = false;
 
         // Client connections
@@ -164,12 +165,12 @@ namespace ServerFpsProjectZero.Server
 
                 string type = packet["type"].ToString();
 
-                // Packet trace. By default only the high-rate gameplay packets (movement and
-                // shooting) are logged, which is what is normally wanted - they are the ones
-                // that need proving on the wire. Set TraceAllPackets to log everything, or
-                // TracePackets to false to silence the trace entirely.
+                // Packet trace, off by default. When on it logs shooting only, unless
+                // TraceAllPackets is set. Movement is deliberately excluded even then: it fires
+                // at 20Hz per player and swamps everything else.
                 bool traced = TracePackets &&
-                              (TraceAllPackets || type == "movement" || type == "shoot" || type == "shoot_input");
+                              (TraceAllPackets ||
+                               (type != "movement" && (type == "shoot" || type == "shoot_input")));
 
                 if (traced)
                     Console.WriteLine($"[Packet] recv '{type}' from {remoteEndpoint}");
