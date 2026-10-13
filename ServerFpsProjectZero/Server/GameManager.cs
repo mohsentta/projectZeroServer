@@ -17,6 +17,9 @@ namespace ServerFpsProjectZero.Server
         private ConcurrentDictionary<int, GameRoom> activeGames;
         private int nextGameId = 1;
         private bool isRunning = false;
+
+        /// <summary>When true, every shoot packet logs its hit-test arithmetic.</summary>
+        public bool ShootDebug { get; set; } = false;
         private Thread gameUpdateThread;
 
         // Configuration
@@ -410,9 +413,15 @@ namespace ServerFpsProjectZero.Server
             float dirY = sLen > 0.0001f ? sdy / sLen : 0f;
             float dirZ = sLen > 0.0001f ? sdz / sLen : 1f;
 
-            const float BODY_RADIUS = 1.2f;
-            const float HEAD_RADIUS = 0.55f;
+            // The reported position is the character root, i.e. the feet. The hit volume is a
+            // vertical capsule from feet to head rather than a sphere centred on the feet:
+            // with a feet-centred sphere the client (which shoots from its camera at eye
+            // height) had to aim at the legs to register anything, and every shot at the
+            // chest or head passed above the volume.
+            const float BODY_RADIUS = 0.45f;
+            const float PLAYER_HEIGHT = 1.8f;
             const float HEAD_HEIGHT = 1.6f;
+            const float HEAD_RADIUS = 0.32f;
             const float MAX_RANGE = 200f;
 
             foreach (var target in game.RedTeam.Concat(game.BlueTeam))
@@ -425,27 +434,71 @@ namespace ServerFpsProjectZero.Server
 
                 var targetPos = game.PlayerPositions[target.PlayerId];
 
-                // Distance travelled along the ray before reaching the target.
-                float tx = targetPos.x - shooterPos.x, ty = targetPos.y - shooterPos.y, tz = targetPos.z - shooterPos.z;
-                float distanceToTarget = tx * dirX + ty * dirY + tz * dirZ;
-                if (distanceToTarget < 0f || distanceToTarget > MAX_RANGE)
-                    continue;
+                // Closest approach between the shot ray and the target's vertical capsule axis.
+                float ax = targetPos.x, ay = targetPos.y, az = targetPos.z;          // feet
+                float bx = targetPos.x, by = targetPos.y + PLAYER_HEIGHT, bz = targetPos.z; // head
 
-                // Closest approach distance between the target and the ray.
-                float perpX = tx - dirX * distanceToTarget;
-                float perpY = ty - dirY * distanceToTarget;
-                float perpZ = tz - dirZ * distanceToTarget;
-                float perpDist = (float)Math.Sqrt(perpX * perpX + perpY * perpY + perpZ * perpZ);
+                float abx = bx - ax, aby = by - ay, abz = bz - az;
+                float apx = shooterPos.x - ax, apy = shooterPos.y - ay, apz = shooterPos.z - az;
 
-                // Headshot when the ray passes close to the head centre.
-                float hy = (targetPos.y + HEAD_HEIGHT) - shooterPos.y;
-                float headDist = tx * dirX + hy * dirY + tz * dirZ;
-                float headPerpX = tx - dirX * headDist;
-                float headPerpY = hy - dirY * headDist;
-                float headPerpZ = tz - dirZ * headDist;
-                float headPerp = (float)Math.Sqrt(headPerpX * headPerpX + headPerpY * headPerpY + headPerpZ * headPerpZ);
+                float abLenSq = abx * abx + aby * aby + abz * abz;
+                float abDotDir = abx * dirX + aby * dirY + abz * dirZ;
+                float abDotAp = abx * apx + aby * apy + abz * apz;
+                float dirDotAp = dirX * apx + dirY * apy + dirZ * apz;
+                float apLenSq = apx * apx + apy * apy + apz * apz;
+
+                // Solve for the ray parameter t and capsule parameter s that minimise distance.
+                // From  C = A + t*D - (P + s*AB),  requiring dC/dt = dC/ds = 0:
+                //   t = (abDotDir * abDotAp - abLenSq * dirDotAp) / (abLenSq - abDotDir^2)
+                float denom = abLenSq - abDotDir * abDotDir;
+                float t, s;
+                if (denom > 0.0001f)
+                    t = (abDotDir * abDotAp - abLenSq * dirDotAp) / denom;
+                else
+                    t = -dirDotAp;   // capsule is parallel to the ray
+
+                if (t < 0f) t = 0f;
+                if (t > MAX_RANGE) continue;
+
+                s = abDotAp + t * abDotDir;
+                if (s < 0f) s = 0f;
+                else if (s > abLenSq) s = abLenSq;
+
+                // Closest point on the capsule axis, and its distance to the ray.
+                float cx = ax + abx * (abLenSq > 0.0001f ? s / abLenSq : 0f);
+                float cy = ay + aby * (abLenSq > 0.0001f ? s / abLenSq : 0f);
+                float cz = az + abz * (abLenSq > 0.0001f ? s / abLenSq : 0f);
+
+                float ex = shooterPos.x + dirX * t - cx;
+                float ey = shooterPos.y + dirY * t - cy;
+                float ez = shooterPos.z + dirZ * t - cz;
+                float perpDist = (float)Math.Sqrt(ex * ex + ey * ey + ez * ez);
+
+                // Distance along the ray to the impact, used for damage falloff.
+                float distanceToTarget = t;
+
+                // Headshot when the impact lands near the head sphere rather than the body.
+                float headCentreY = targetPos.y + HEAD_HEIGHT;
+                float hx = shooterPos.x + dirX * t - targetPos.x;
+                float hy = shooterPos.y + dirY * t - headCentreY;
+                float hz = shooterPos.z + dirZ * t - targetPos.z;
+                float headPerp = (float)Math.Sqrt(hx * hx + hy * hy + hz * hz);
 
                 bool isHeadshot = headPerp <= HEAD_RADIUS;
+
+                // Diagnostic: shows exactly why a shot was accepted or rejected. Enabled via
+                // the "shootdebug" console command.
+                if (ShootDebug)
+                {
+                    Console.WriteLine($"[Shoot] {client.Username} -> {target.Username}: " +
+                                      $"shooter=({shooterPos.x:0.##},{shooterPos.y:0.##},{shooterPos.z:0.##}) " +
+                                      $"target=({targetPos.x:0.##},{targetPos.y:0.##},{targetPos.z:0.##}) " +
+                                      $"dir=({dirX:0.###},{dirY:0.###},{dirZ:0.###}) " +
+                                      $"t={t:0.###} perpDist={perpDist:0.###} (max {BODY_RADIUS}) " +
+                                      $"headPerp={headPerp:0.###} (max {HEAD_RADIUS}) " +
+                                      $"-> {(perpDist <= BODY_RADIUS || isHeadshot ? "HIT" : "miss")}");
+                }
+
                 if (perpDist > BODY_RADIUS && !isHeadshot)
                     continue;
 
