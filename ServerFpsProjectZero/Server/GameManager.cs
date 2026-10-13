@@ -382,6 +382,27 @@ namespace ServerFpsProjectZero.Server
             var input = JsonConvert.DeserializeObject<ShootInput>(jsonData);
             var client = serverManager.GetClientByToken(input.token);
 
+            if (ShootDebug)
+            {
+                if (input == null)
+                {
+                    Console.WriteLine("[Shoot] rejected: payload did not deserialize");
+                    return;
+                }
+
+                if (client == null)
+                {
+                    Console.WriteLine("[Shoot] rejected: unknown session token");
+                    return;
+                }
+
+                Console.WriteLine($"[Shoot] {client.Username} (player {client.PlayerId}, team {client.TeamId}) " +
+                                  $"inGame={client.InGame} gameId={client.CurrentGameId} " +
+                                  $"weapon={input.weaponId} " +
+                                  $"reported origin=({input.originX:0.##},{input.originY:0.##},{input.originZ:0.##}) " +
+                                  $"target=({input.targetX:0.##},{input.targetY:0.##},{input.targetZ:0.##})");
+            }
+
             if (client == null || !client.InGame)
                 return;
 
@@ -430,7 +451,15 @@ namespace ServerFpsProjectZero.Server
                     continue;
 
                 if (!game.PlayerPositions.ContainsKey(target.PlayerId))
+                {
+                    // The server cannot test a target it has never been told about, so this
+                    // looks identical to a miss from the client's side.
+                    if (ShootDebug)
+                        Console.WriteLine($"[Shoot]   no known position for {target.Username} " +
+                                          $"(player {target.PlayerId}) - movement never arrived, skipping");
+
                     continue;
+                }
 
                 var targetPos = game.PlayerPositions[target.PlayerId];
 
@@ -490,9 +519,19 @@ namespace ServerFpsProjectZero.Server
                 // the "shootdebug" console command.
                 if (ShootDebug)
                 {
+                    // The client aims at a point on the enemy MODEL it can see. The server tests
+                    // that ray against the position it was TOLD for that player. Printing both
+                    // shows whether those two agree - if they do not, the client is shooting at
+                    // where the model is drawn while the server still has an older position.
+                    float gapX = aimPos.x - targetPos.x;
+                    float gapY = aimPos.y - targetPos.y;
+                    float gapZ = aimPos.z - targetPos.z;
+                    float gap = (float)Math.Sqrt(gapX * gapX + gapY * gapY + gapZ * gapZ);
+
                     Console.WriteLine($"[Shoot] {client.Username} -> {target.Username}: " +
-                                      $"shooter=({shooterPos.x:0.##},{shooterPos.y:0.##},{shooterPos.z:0.##}) " +
-                                      $"target=({targetPos.x:0.##},{targetPos.y:0.##},{targetPos.z:0.##}) " +
+                                      $"clientAim=({aimPos.x:0.##},{aimPos.y:0.##},{aimPos.z:0.##}) " +
+                                      $"serverHasTargetAt=({targetPos.x:0.##},{targetPos.y:0.##},{targetPos.z:0.##}) " +
+                                      $"gap={gap:0.##}m | " +
                                       $"dir=({dirX:0.###},{dirY:0.###},{dirZ:0.###}) " +
                                       $"t={t:0.###} perpDist={perpDist:0.###} (max {BODY_RADIUS}) " +
                                       $"headPerp={headPerp:0.###} (max {HEAD_RADIUS}) " +
