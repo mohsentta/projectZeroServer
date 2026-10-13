@@ -445,6 +445,52 @@ namespace ServerFpsProjectZero.Server
             const float HEAD_RADIUS = 0.32f;
             const float MAX_RANGE = 200f;
 
+            // Position dump: everything the server knows about this shot, before any hit test.
+            // The shooter line shows the client's own reported ray against the position the
+            // server holds for the shooter; each enemy line shows where the client aimed
+            // against where the server thinks that enemy is, and the gap between them.
+            if (ShootDebug)
+            {
+                Console.WriteLine($"[Shoot] --- shot by {client.Username} (player {client.PlayerId}) ---");
+                Console.WriteLine($"[Shoot]   client reported ray: origin=({input.originX:0.###},{input.originY:0.###},{input.originZ:0.###}) " +
+                                  $"target=({input.targetX:0.###},{input.targetY:0.###},{input.targetZ:0.###})");
+
+                if (game.PlayerPositions.TryGetValue(client.PlayerId, out var shooterServerPos))
+                {
+                    float gapX = input.originX - shooterServerPos.x;
+                    float gapY = input.originY - shooterServerPos.y;
+                    float gapZ = input.originZ - shooterServerPos.z;
+                    float shooterGap = (float)Math.Sqrt(gapX * gapX + gapY * gapY + gapZ * gapZ);
+
+                    Console.WriteLine($"[Shoot]   server holds {client.Username} at " +
+                                      $"({shooterServerPos.x:0.###},{shooterServerPos.y:0.###},{shooterServerPos.z:0.###}) " +
+                                      $"- shooter gap {shooterGap:0.###}m");
+                }
+                else
+                {
+                    Console.WriteLine($"[Shoot]   server has NO position for {client.Username} " +
+                                      $"(player {client.PlayerId}) - movement never arrived");
+                }
+
+                foreach (var t in game.RedTeam.Concat(game.BlueTeam))
+                {
+                    if (t.PlayerId == client.PlayerId) continue;
+
+                    string side = t.TeamId == client.TeamId ? "SAME TEAM (skipped)" : "enemy";
+
+                    if (game.PlayerPositions.TryGetValue(t.PlayerId, out var p))
+                    {
+                        Console.WriteLine($"[Shoot]   server holds {t.Username} (player {t.PlayerId}, {side}) at " +
+                                          $"({p.x:0.###},{p.y:0.###},{p.z:0.###})");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"[Shoot]   server has NO position for {t.Username} " +
+                                          $"(player {t.PlayerId}, {side})");
+                    }
+                }
+            }
+
             foreach (var target in game.RedTeam.Concat(game.BlueTeam))
             {
                 if (target.PlayerId == client.PlayerId || target.TeamId == client.TeamId)
@@ -519,22 +565,23 @@ namespace ServerFpsProjectZero.Server
                 // the "shootdebug" console command.
                 if (ShootDebug)
                 {
-                    // The client aims at a point on the enemy MODEL it can see. The server tests
-                    // that ray against the position it was TOLD for that player. Printing both
-                    // shows whether those two agree - if they do not, the client is shooting at
-                    // where the model is drawn while the server still has an older position.
+                    // The client aims at a point on the enemy model it can see. The server tests
+                    // that ray against the position it was TOLD for that player.
                     float gapX = aimPos.x - targetPos.x;
                     float gapY = aimPos.y - targetPos.y;
                     float gapZ = aimPos.z - targetPos.z;
                     float gap = (float)Math.Sqrt(gapX * gapX + gapY * gapY + gapZ * gapZ);
 
-                    Console.WriteLine($"[Shoot] {client.Username} -> {target.Username}: " +
-                                      $"clientAim=({aimPos.x:0.##},{aimPos.y:0.##},{aimPos.z:0.##}) " +
-                                      $"serverHasTargetAt=({targetPos.x:0.##},{targetPos.y:0.##},{targetPos.z:0.##}) " +
-                                      $"gap={gap:0.##}m | " +
-                                      $"dir=({dirX:0.###},{dirY:0.###},{dirZ:0.###}) " +
-                                      $"t={t:0.###} perpDist={perpDist:0.###} (max {BODY_RADIUS}) " +
-                                      $"headPerp={headPerp:0.###} (max {HEAD_RADIUS}) " +
+                    Console.WriteLine($"[Shoot]   vs {target.Username}: clientAim=" +
+                                      $"({aimPos.x:0.###},{aimPos.y:0.###},{aimPos.z:0.###}) " +
+                                      $"serverAt=({targetPos.x:0.###},{targetPos.y:0.###},{targetPos.z:0.###}) " +
+                                      $"gap={gap:0.###}m");
+
+                    // Would this shot hit if the server's position were the one the client
+                    // aimed at? Distinguishing that from a genuine miss tells us whether the
+                    // problem is the hit volume or a stale position.
+                    Console.WriteLine($"[Shoot]     ray: t={t:0.###} perpDist={perpDist:0.###} " +
+                                      $"(max {BODY_RADIUS}) headPerp={headPerp:0.###} (max {HEAD_RADIUS}) " +
                                       $"-> {(perpDist <= BODY_RADIUS || isHeadshot ? "HIT" : "miss")}");
                 }
 
