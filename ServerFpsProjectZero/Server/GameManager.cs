@@ -18,8 +18,12 @@ namespace ServerFpsProjectZero.Server
         private int nextGameId = 1;
         private bool isRunning = false;
 
-        /// <summary>When true, every shoot packet logs its hit-test arithmetic.</summary>
-        public bool ShootDebug { get; set; } = false;
+        /// <summary>
+        /// When true, every shoot packet logs its hit-test arithmetic. On by default while we
+        /// are still diagnosing hit registration; pass --no-shootdebug or use the
+        /// "shootdebug" console command to turn it off once shooting is trusted.
+        /// </summary>
+        public bool ShootDebug { get; set; } = true;
         private Thread gameUpdateThread;
 
         // Configuration

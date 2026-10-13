@@ -22,9 +22,10 @@ namespace ServerFpsProjectZero
 
             // Create managers
             GameManager gameManager = new GameManager(serverManager);
-            // "--shootdebug" logs the hit-test arithmetic for every shot.
-            gameManager.ShootDebug = Array.Exists(args, a =>
-                string.Equals(a, "--shootdebug", StringComparison.OrdinalIgnoreCase));
+            // Shoot diagnostics default to ON. "--no-shootdebug" turns them off; the
+            // "shootdebug" console command toggles them at runtime.
+            if (Array.Exists(args, a => string.Equals(a, "--no-shootdebug", StringComparison.OrdinalIgnoreCase)))
+                gameManager.ShootDebug = false;
             LoginManager loginManager = new LoginManager(serverManager, gameManager, connectionString);
             FriendsManager friendsManager = new FriendsManager(connectionString, serverManager, loginManager);
             LobbyManager lobbyManager = new LobbyManager(serverManager, gameManager);
