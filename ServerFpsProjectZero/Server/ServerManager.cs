@@ -22,13 +22,13 @@ namespace ServerFpsProjectZero.Server
         private Timer heartbeatCleanupTimer;
 
         /// <summary>
-        /// When true, every packet type the server receives is logged. Defaults on so a client
-        /// that claims to have sent something can be checked against what actually arrived.
+        /// When true, the packet trace is active. Defaults on, but only movement and shooting
+        /// are logged unless <see cref="TraceAllPackets"/> is also set.
         /// </summary>
         public bool TracePackets { get; set; } = true;
 
-        /// <summary>Unique marker so a build can be proven to include this file.</summary>
-        public const string PacketTraceMarker = "PACKET_TRACE_V2_MARKER";
+        /// <summary>When true, every packet type is logged rather than just movement/shooting.</summary>
+        public bool TraceAllPackets { get; set; } = false;
 
         // Client connections
         private ConcurrentDictionary<int, ClientConnection> clients;
@@ -164,10 +164,14 @@ namespace ServerFpsProjectZero.Server
 
                 string type = packet["type"].ToString();
 
-                // Packet trace: prints every packet type the server actually receives. This is
-                // the ground truth for "the client says it sent it but the server never reacts",
-                // and it also flags types the dispatch switch does not handle at all.
-                if (TracePackets)
+                // Packet trace. By default only the high-rate gameplay packets (movement and
+                // shooting) are logged, which is what is normally wanted - they are the ones
+                // that need proving on the wire. Set TraceAllPackets to log everything, or
+                // TracePackets to false to silence the trace entirely.
+                bool traced = TracePackets &&
+                              (TraceAllPackets || type == "movement" || type == "shoot" || type == "shoot_input");
+
+                if (traced)
                     Console.WriteLine($"[Packet] recv '{type}' from {remoteEndpoint}");
 
                 switch (type)
