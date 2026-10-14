@@ -63,12 +63,30 @@ namespace ServerFpsProjectZero.Shared
         public List<int> OwnedGrenades { get; set; }
         public List<LootBox> LootBoxes { get; set; }
 
+        /// <summary>
+        /// Unopened crates, one count per rarity.
+        ///
+        /// These are counts rather than list entries on purpose: the existing LootBoxes list
+        /// gives every crate an id and an acquired timestamp, which is unnecessary for a
+        /// stackable consumable and awkward to grant in bulk. The list is kept as-is for
+        /// anything that still needs individual crates.
+        /// </summary>
+        public int CommonCrates { get; set; }
+        public int RareCrates { get; set; }
+        public int EpicCrates { get; set; }
+        public int LegendaryCrates { get; set; }
+
         public PlayerInventory()
         {
             OwnedWeapons = new List<int>();
             OwnedSkins = new List<int>();
             OwnedGrenades = new List<int>();
             LootBoxes = new List<LootBox>();
+
+            CommonCrates = 0;
+            RareCrates = 0;
+            EpicCrates = 0;
+            LegendaryCrates = 0;
         }
     }
 

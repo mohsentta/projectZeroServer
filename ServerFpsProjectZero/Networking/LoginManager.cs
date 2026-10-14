@@ -215,9 +215,19 @@ namespace ServerFpsProjectZero.Networking
                         OwnedSkins TEXT DEFAULT '[]',
                         OwnedGrenades TEXT DEFAULT '[]',
                         LootBoxes TEXT DEFAULT '[]',
+                        CommonCrates INTEGER DEFAULT 0,
+                        RareCrates INTEGER DEFAULT 0,
+                        EpicCrates INTEGER DEFAULT 0,
+                        LegendaryCrates INTEGER DEFAULT 0,
                         FOREIGN KEY (PlayerId) REFERENCES Players(PlayerId)
                     )";
                 command.ExecuteNonQuery();
+
+                // Unopened crate counts, added after PlayerInventory already existed.
+                AddColumnIfMissing(connection, "PlayerInventory", "CommonCrates", "INTEGER DEFAULT 0");
+                AddColumnIfMissing(connection, "PlayerInventory", "RareCrates", "INTEGER DEFAULT 0");
+                AddColumnIfMissing(connection, "PlayerInventory", "EpicCrates", "INTEGER DEFAULT 0");
+                AddColumnIfMissing(connection, "PlayerInventory", "LegendaryCrates", "INTEGER DEFAULT 0");
 
                 // Create loadout table
                 command.CommandText = @"
@@ -367,13 +377,20 @@ namespace ServerFpsProjectZero.Networking
 
                     // Insert inventory
                     command.CommandText = @"
-                        INSERT INTO PlayerInventory (PlayerId, OwnedWeapons, OwnedSkins, OwnedGrenades, LootBoxes)
-                        VALUES (@PlayerId, @OwnedWeapons, @OwnedSkins, @OwnedGrenades, @LootBoxes)";
+                        INSERT INTO PlayerInventory (PlayerId, OwnedWeapons, OwnedSkins, OwnedGrenades, LootBoxes,
+                                                     CommonCrates, RareCrates, EpicCrates, LegendaryCrates)
+                        VALUES (@PlayerId, @OwnedWeapons, @OwnedSkins, @OwnedGrenades, @LootBoxes,
+                                @CommonCrates, @RareCrates, @EpicCrates, @LegendaryCrates)";
                     command.Parameters.AddWithValue("@PlayerId", playerId);
                     command.Parameters.AddWithValue("@OwnedWeapons", "[1,2,3,4,5,6]");
                     command.Parameters.AddWithValue("@OwnedSkins", "[1,2,3]");
                     command.Parameters.AddWithValue("@OwnedGrenades", "[4,5]");
                     command.Parameters.AddWithValue("@LootBoxes", "[]");
+                    // New accounts start with no crates - they are earned.
+                    command.Parameters.AddWithValue("@CommonCrates", 0);
+                    command.Parameters.AddWithValue("@RareCrates", 0);
+                    command.Parameters.AddWithValue("@EpicCrates", 0);
+                    command.Parameters.AddWithValue("@LegendaryCrates", 0);
                     command.ExecuteNonQuery();
 
                     // Insert loadout
@@ -458,6 +475,7 @@ namespace ServerFpsProjectZero.Networking
                 var command = connection.CreateCommand();
                 command.CommandText = @"
                     SELECT p.*, i.OwnedWeapons, i.OwnedSkins, i.OwnedGrenades, i.LootBoxes,
+                           i.CommonCrates, i.RareCrates, i.EpicCrates, i.LegendaryCrates,
                            l.PrimaryWeaponId, l.SecondaryWeaponId, l.MeleeWeaponId, l.GrenadeId, 
                            l.PlayerSkinId, l.WeaponSkinId
                     FROM Players p
@@ -485,6 +503,7 @@ namespace ServerFpsProjectZero.Networking
                 var command = connection.CreateCommand();
                 command.CommandText = @"
                     SELECT p.*, i.OwnedWeapons, i.OwnedSkins, i.OwnedGrenades, i.LootBoxes,
+                           i.CommonCrates, i.RareCrates, i.EpicCrates, i.LegendaryCrates,
                            l.PrimaryWeaponId, l.SecondaryWeaponId, l.MeleeWeaponId, l.GrenadeId, 
                            l.PlayerSkinId, l.WeaponSkinId
                     FROM Players p
@@ -563,7 +582,11 @@ namespace ServerFpsProjectZero.Networking
                     OwnedWeapons = JsonConvert.DeserializeObject<List<int>>(reader.GetString(reader.GetOrdinal("OwnedWeapons"))),
                     OwnedSkins = JsonConvert.DeserializeObject<List<int>>(reader.GetString(reader.GetOrdinal("OwnedSkins"))),
                     OwnedGrenades = JsonConvert.DeserializeObject<List<int>>(reader.GetString(reader.GetOrdinal("OwnedGrenades"))),
-                    LootBoxes = JsonConvert.DeserializeObject<List<LootBox>>(reader.GetString(reader.GetOrdinal("LootBoxes")))
+                    LootBoxes = JsonConvert.DeserializeObject<List<LootBox>>(reader.GetString(reader.GetOrdinal("LootBoxes"))),
+                    CommonCrates = reader.GetInt32(reader.GetOrdinal("CommonCrates")),
+                    RareCrates = reader.GetInt32(reader.GetOrdinal("RareCrates")),
+                    EpicCrates = reader.GetInt32(reader.GetOrdinal("EpicCrates")),
+                    LegendaryCrates = reader.GetInt32(reader.GetOrdinal("LegendaryCrates"))
                 },
                 Loadout = new PlayerLoadout
                 {
@@ -685,13 +708,21 @@ namespace ServerFpsProjectZero.Networking
                         OwnedWeapons = @OwnedWeapons,
                         OwnedSkins = @OwnedSkins,
                         OwnedGrenades = @OwnedGrenades,
-                        LootBoxes = @LootBoxes
+                        LootBoxes = @LootBoxes,
+                        CommonCrates = @CommonCrates,
+                        RareCrates = @RareCrates,
+                        EpicCrates = @EpicCrates,
+                        LegendaryCrates = @LegendaryCrates
                     WHERE PlayerId = @PlayerId";
 
                 command.Parameters.AddWithValue("@OwnedWeapons", JsonConvert.SerializeObject(player.Inventory.OwnedWeapons));
                 command.Parameters.AddWithValue("@OwnedSkins", JsonConvert.SerializeObject(player.Inventory.OwnedSkins));
                 command.Parameters.AddWithValue("@OwnedGrenades", JsonConvert.SerializeObject(player.Inventory.OwnedGrenades));
                 command.Parameters.AddWithValue("@LootBoxes", JsonConvert.SerializeObject(player.Inventory.LootBoxes));
+                command.Parameters.AddWithValue("@CommonCrates", player.Inventory.CommonCrates);
+                command.Parameters.AddWithValue("@RareCrates", player.Inventory.RareCrates);
+                command.Parameters.AddWithValue("@EpicCrates", player.Inventory.EpicCrates);
+                command.Parameters.AddWithValue("@LegendaryCrates", player.Inventory.LegendaryCrates);
                 command.Parameters.AddWithValue("@PlayerId", player.PlayerId);
 
                 command.ExecuteNonQuery();
