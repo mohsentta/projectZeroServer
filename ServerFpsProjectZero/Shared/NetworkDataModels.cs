@@ -20,15 +20,39 @@ namespace ServerFpsProjectZero.Shared
         public float y;
     }
 
+    /// <summary>
+    /// What the player is carrying right now, and which skin each of their guns wears.
+    ///
+    /// This is a selection, not a copy: every id here must also appear in
+    /// <see cref="PlayerInventory.UnlockedItems"/>.
+    /// </summary>
     [Serializable]
     public class PlayerLoadout
     {
+        // The slot -> item assignments.
         public int PrimaryWeaponId { get; set; }
         public int SecondaryWeaponId { get; set; }
         public int MeleeWeaponId { get; set; }
         public int GrenadeId { get; set; }
+
+        /// <summary>
+        /// Skin applied to each gun, keyed by WEAPON id (not by slot).
+        ///
+        /// Weapon-keyed is deliberate. A gun skin belongs to one specific gun, so
+        /// weaponId -> skinId records the assignment once and it follows that gun: swapping a
+        /// different weapon into the primary slot never forgets the original's skin, and the
+        /// same weapon in two slots wears one consistent skin. A slot-keyed map would lose the
+        /// assignment the moment the weapon left the slot.
+        ///
+        /// A weapon with no entry wears its default skin.
+        /// </summary>
+        public Dictionary<int, int> WeaponSkins { get; set; }
+
+        /// <summary>Character skins the player owns, most-preferred first.</summary>
+        public List<int> CharacterSkins { get; set; }
+
+        /// <summary>The character skin currently worn. Must be one of <see cref="CharacterSkins"/>.</summary>
         public int PlayerSkinId { get; set; }
-        public int WeaponSkinId { get; set; }
 
         public PlayerLoadout()
         {
@@ -36,8 +60,10 @@ namespace ServerFpsProjectZero.Shared
             SecondaryWeaponId = 2;
             MeleeWeaponId = 3;
             GrenadeId = 4;
+
+            WeaponSkins = new Dictionary<int, int>();
+            CharacterSkins = new List<int>();
             PlayerSkinId = 1;
-            WeaponSkinId = 1;
         }
     }
 
@@ -58,9 +84,18 @@ namespace ServerFpsProjectZero.Shared
     [Serializable]
     public class PlayerInventory
     {
-        public List<int> OwnedWeapons { get; set; }
-        public List<int> OwnedSkins { get; set; }
-        public List<int> OwnedGrenades { get; set; }
+        /// <summary>
+        /// Every non-stackable item this player has unlocked: guns, skins, grenades, melees.
+        ///
+        /// One flat list, because item ids are globally unique across every item type - there
+        /// is only ever one item 4 in the game. Owning something is therefore a single
+        /// Contains, with no type to look up and no per-type list to search.
+        ///
+        /// This holds only non-stackables. Stackable things (Gold, Money, shards, crates) are
+        /// counts, because "do you own it" and "how many do you have" are different questions.
+        /// </summary>
+        public List<int> UnlockedItems { get; set; }
+
         public List<LootBox> LootBoxes { get; set; }
 
         /// <summary>
@@ -78,9 +113,7 @@ namespace ServerFpsProjectZero.Shared
 
         public PlayerInventory()
         {
-            OwnedWeapons = new List<int>();
-            OwnedSkins = new List<int>();
-            OwnedGrenades = new List<int>();
+            UnlockedItems = new List<int>();
             LootBoxes = new List<LootBox>();
 
             CommonCrates = 0;

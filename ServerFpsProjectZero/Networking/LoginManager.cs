@@ -211,9 +211,7 @@ namespace ServerFpsProjectZero.Networking
                 command.CommandText = @"
                     CREATE TABLE IF NOT EXISTS PlayerInventory (
                         PlayerId INTEGER PRIMARY KEY,
-                        OwnedWeapons TEXT DEFAULT '[]',
-                        OwnedSkins TEXT DEFAULT '[]',
-                        OwnedGrenades TEXT DEFAULT '[]',
+                        UnlockedItems TEXT DEFAULT '[]',
                         LootBoxes TEXT DEFAULT '[]',
                         CommonCrates INTEGER DEFAULT 0,
                         RareCrates INTEGER DEFAULT 0,
@@ -223,13 +221,27 @@ namespace ServerFpsProjectZero.Networking
                     )";
                 command.ExecuteNonQuery();
 
+                // Unlocked items replaced the per-type columns (OwnedWeapons, OwnedSkins,
+                // OwnedGrenades) with one flat list, because item ids are globally unique.
+                bool unlockedColumnAdded = AddColumnIfMissing(connection, "PlayerInventory", "UnlockedItems", "TEXT DEFAULT '[]'");
+
+                // The old columns still hold each player's unlocks, so fold them into the new
+                // list rather than starting everyone from empty. The old columns are left in
+                // place as a safety net; nothing reads them once this has run.
+                if (unlockedColumnAdded)
+                {
+                    FoldLegacyOwnedItemsIntoUnlocked(connection);
+                }
+
                 // Unopened crate counts, added after PlayerInventory already existed.
                 AddColumnIfMissing(connection, "PlayerInventory", "CommonCrates", "INTEGER DEFAULT 0");
                 AddColumnIfMissing(connection, "PlayerInventory", "RareCrates", "INTEGER DEFAULT 0");
                 AddColumnIfMissing(connection, "PlayerInventory", "EpicCrates", "INTEGER DEFAULT 0");
                 AddColumnIfMissing(connection, "PlayerInventory", "LegendaryCrates", "INTEGER DEFAULT 0");
 
-                // Create loadout table
+                // Create loadout table. The slot columns carry a SkinId for weapon slots, so a
+                // slot remembers the skin applied to whatever weapon currently sits in it.
+                // The legacy column names are kept so an existing database keeps working.
                 command.CommandText = @"
                     CREATE TABLE IF NOT EXISTS PlayerLoadout (
                         PlayerId INTEGER PRIMARY KEY,
@@ -239,9 +251,53 @@ namespace ServerFpsProjectZero.Networking
                         GrenadeId INTEGER DEFAULT 4,
                         PlayerSkinId INTEGER DEFAULT 1,
                         WeaponSkinId INTEGER DEFAULT 1,
+                        PrimarySkinId INTEGER DEFAULT 0,
+                        SecondarySkinId INTEGER DEFAULT 0,
+                        MeleeSkinId INTEGER DEFAULT 0,
+                        GrenadeSkinId INTEGER DEFAULT 0,
+                        UpdatedAt TEXT,
                         FOREIGN KEY (PlayerId) REFERENCES Players(PlayerId)
                     )";
                 command.ExecuteNonQuery();
+
+                // Per-gun skin assignments, keyed by weapon id rather than slot.
+                command.CommandText = @"
+                    CREATE TABLE IF NOT EXISTS PlayerWeaponSkins (
+                        PlayerId INTEGER NOT NULL,
+                        WeaponId INTEGER NOT NULL,
+                        SkinId INTEGER NOT NULL,
+                        UpdatedAt TEXT,
+                        PRIMARY KEY (PlayerId, WeaponId),
+                        FOREIGN KEY (PlayerId) REFERENCES Players(PlayerId)
+                    )";
+                command.ExecuteNonQuery();
+
+                // Character skins the player owns, in preference order.
+                command.CommandText = @"
+                    CREATE TABLE IF NOT EXISTS PlayerCharacterSkins (
+                        PlayerId INTEGER NOT NULL,
+                        SkinId INTEGER NOT NULL,
+                        SortOrder INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY (PlayerId, SkinId),
+                        FOREIGN KEY (PlayerId) REFERENCES Players(PlayerId)
+                    )";
+                command.ExecuteNonQuery();
+
+                // Columns added after PlayerLoadout may already exist in a live database.
+                AddColumnIfMissing(connection, "PlayerLoadout", "PrimarySkinId", "INTEGER DEFAULT 0");
+                AddColumnIfMissing(connection, "PlayerLoadout", "SecondarySkinId", "INTEGER DEFAULT 0");
+                AddColumnIfMissing(connection, "PlayerLoadout", "MeleeSkinId", "INTEGER DEFAULT 0");
+                AddColumnIfMissing(connection, "PlayerLoadout", "GrenadeSkinId", "INTEGER DEFAULT 0");
+                AddColumnIfMissing(connection, "PlayerLoadout", "UpdatedAt", "TEXT");
+
+                // The old single WeaponSkinId applied to whichever gun was primary. Fold it into
+                // the per-gun table so a player who had a skin set does not silently lose it.
+                FoldLegacyWeaponSkinIntoAssignments(connection);
+
+                // Character skins had no per-player list before, so a migrated player would
+                // otherwise have an empty list while still wearing PlayerSkinId - i.e. wearing a
+                // skin they do not appear to own. Give everyone the skin they are wearing.
+                BackfillCharacterSkinsFromWorn(connection);
 
                 // Create indices
                 command.CommandText = "CREATE INDEX IF NOT EXISTS idx_players_username ON Players(Username)";
@@ -375,16 +431,22 @@ namespace ServerFpsProjectZero.Networking
                     command.CommandText = "SELECT last_insert_rowid()";
                     var playerId = Convert.ToInt32(command.ExecuteScalar());
 
-                    // Insert inventory
+                    // Insert inventory.
+                    //
+                    // ITEM ID CONVENTION - ids are globally unique across every item type:
+                    //     1     - 999    weapons, including grenades and melee
+                    //     1000  - 1999   gun skins
+                    //     2000  - 2999   character skins
+                    // 1..4 matches the client's weapon registry (WeaponManager.LoadWeaponData):
+                    // 1 Assault Rifle, 2 Pistol, 3 Combat Knife, 4 Frag Grenade.
                     command.CommandText = @"
-                        INSERT INTO PlayerInventory (PlayerId, OwnedWeapons, OwnedSkins, OwnedGrenades, LootBoxes,
+                        INSERT INTO PlayerInventory (PlayerId, UnlockedItems, LootBoxes,
                                                      CommonCrates, RareCrates, EpicCrates, LegendaryCrates)
-                        VALUES (@PlayerId, @OwnedWeapons, @OwnedSkins, @OwnedGrenades, @LootBoxes,
+                        VALUES (@PlayerId, @UnlockedItems, @LootBoxes,
                                 @CommonCrates, @RareCrates, @EpicCrates, @LegendaryCrates)";
+                    command.Parameters.Clear();
                     command.Parameters.AddWithValue("@PlayerId", playerId);
-                    command.Parameters.AddWithValue("@OwnedWeapons", "[1,2,3,4,5,6]");
-                    command.Parameters.AddWithValue("@OwnedSkins", "[1,2,3]");
-                    command.Parameters.AddWithValue("@OwnedGrenades", "[4,5]");
+                    command.Parameters.AddWithValue("@UnlockedItems", "[1,2,3,4,2001]");
                     command.Parameters.AddWithValue("@LootBoxes", "[]");
                     // New accounts start with no crates - they are earned.
                     command.Parameters.AddWithValue("@CommonCrates", 0);
@@ -395,8 +457,20 @@ namespace ServerFpsProjectZero.Networking
 
                     // Insert loadout
                     command.CommandText = @"
-                        INSERT INTO PlayerLoadout (PlayerId)
-                        VALUES (@PlayerId)";
+                        INSERT INTO PlayerLoadout (PlayerId, PrimaryWeaponId, SecondaryWeaponId,
+                                                   MeleeWeaponId, GrenadeId, PlayerSkinId, WeaponSkinId,
+                                                   PrimarySkinId, SecondarySkinId, MeleeSkinId, GrenadeSkinId,
+                                                   UpdatedAt)
+                        VALUES (@PlayerId, 1, 2, 3, 4, 2001, 0, 0, 0, 0, 0, @UpdatedAt)";
+                    command.Parameters.Clear();
+                    command.Parameters.AddWithValue("@PlayerId", playerId);
+                    command.Parameters.AddWithValue("@UpdatedAt", DateTime.UtcNow.ToString("o"));
+                    command.ExecuteNonQuery();
+
+                    // The player starts owning the one character skin they are wearing.
+                    command.CommandText = @"
+                        INSERT OR REPLACE INTO PlayerCharacterSkins (PlayerId, SkinId, SortOrder)
+                        VALUES (@PlayerId, 2001, 0)";
                     command.Parameters.Clear();
                     command.Parameters.AddWithValue("@PlayerId", playerId);
                     command.ExecuteNonQuery();
@@ -474,10 +548,10 @@ namespace ServerFpsProjectZero.Networking
                 connection.Open();
                 var command = connection.CreateCommand();
                 command.CommandText = @"
-                    SELECT p.*, i.OwnedWeapons, i.OwnedSkins, i.OwnedGrenades, i.LootBoxes,
+                    SELECT p.*, i.UnlockedItems, i.LootBoxes,
                            i.CommonCrates, i.RareCrates, i.EpicCrates, i.LegendaryCrates,
                            l.PrimaryWeaponId, l.SecondaryWeaponId, l.MeleeWeaponId, l.GrenadeId, 
-                           l.PlayerSkinId, l.WeaponSkinId
+                           l.PlayerSkinId
                     FROM Players p
                     LEFT JOIN PlayerInventory i ON p.PlayerId = i.PlayerId
                     LEFT JOIN PlayerLoadout l ON p.PlayerId = l.PlayerId
@@ -488,7 +562,9 @@ namespace ServerFpsProjectZero.Networking
                 {
                     if (reader.Read())
                     {
-                        return MapReaderToPlayerProfile(reader);
+                        var profile = MapReaderToPlayerProfile(reader);
+                        LoadLoadoutExtras(connection, profile);
+                        return profile;
                     }
                 }
             }
@@ -502,10 +578,10 @@ namespace ServerFpsProjectZero.Networking
                 connection.Open();
                 var command = connection.CreateCommand();
                 command.CommandText = @"
-                    SELECT p.*, i.OwnedWeapons, i.OwnedSkins, i.OwnedGrenades, i.LootBoxes,
+                    SELECT p.*, i.UnlockedItems, i.LootBoxes,
                            i.CommonCrates, i.RareCrates, i.EpicCrates, i.LegendaryCrates,
                            l.PrimaryWeaponId, l.SecondaryWeaponId, l.MeleeWeaponId, l.GrenadeId, 
-                           l.PlayerSkinId, l.WeaponSkinId
+                           l.PlayerSkinId
                     FROM Players p
                     LEFT JOIN PlayerInventory i ON p.PlayerId = i.PlayerId
                     LEFT JOIN PlayerLoadout l ON p.PlayerId = l.PlayerId
@@ -516,7 +592,9 @@ namespace ServerFpsProjectZero.Networking
                 {
                     if (reader.Read())
                     {
-                        return MapReaderToPlayerProfile(reader);
+                        var profile = MapReaderToPlayerProfile(reader);
+                        LoadLoadoutExtras(connection, profile);
+                        return profile;
                     }
                 }
             }
@@ -530,7 +608,8 @@ namespace ServerFpsProjectZero.Networking
         /// for a table that already exists - so a database created before a column was
         /// introduced would never gain it.
         /// </summary>
-        private static void AddColumnIfMissing(SqliteConnection connection, string table, string column, string definition)
+        /// <returns>True when the column was actually added by this call.</returns>
+        private static bool AddColumnIfMissing(SqliteConnection connection, string table, string column, string definition)
         {
             try
             {
@@ -539,17 +618,257 @@ namespace ServerFpsProjectZero.Networking
                     alter.CommandText = $"ALTER TABLE {table} ADD COLUMN {column} {definition}";
                     alter.ExecuteNonQuery();
                     Console.WriteLine($"[Database] Added column {table}.{column}");
+                    return true;
                 }
             }
             catch (SqliteException ex) when (ex.Message.Contains("duplicate column name"))
             {
                 // Already present - the normal case for an up-to-date database.
+                return false;
             }
+        }
+
+        /// <summary>
+        /// One-time migration: copies OwnedWeapons / OwnedSkins / OwnedGrenades into the single
+        /// UnlockedItems list.
+        ///
+        /// The per-type columns were replaced because item ids are globally unique, so splitting
+        /// them by type was redundant - and actively harmful, since a bare loadout id could not be
+        /// checked against a list that needed to be told the type first.
+        ///
+        /// Entries that already exist in UnlockedItems are skipped, so running this twice is safe.
+        /// </summary>
+        private void FoldLegacyOwnedItemsIntoUnlocked(SqliteConnection connection)
+        {
+            var legacyColumns = new[] { "OwnedWeapons", "OwnedSkins", "OwnedGrenades" };
+
+            // Only attempt this if the legacy columns are actually present.
+            var present = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            using (var probe = connection.CreateCommand())
+            {
+                probe.CommandText = "SELECT name FROM pragma_table_info('PlayerInventory')";
+                using (var reader = probe.ExecuteReader())
+                {
+                    while (reader.Read())
+                        present.Add(reader.GetString(0));
+                }
+            }
+
+            var usable = legacyColumns.Where(c => present.Contains(c)).ToList();
+            if (usable.Count == 0)
+                return;
+
+            int migrated = 0;
+            using (var read = connection.CreateCommand())
+            {
+                read.CommandText = $@"SELECT PlayerId, {string.Join(", ", usable)}
+                                      FROM PlayerInventory";
+                using (var reader = read.ExecuteReader())
+                {
+                    var rows = new List<(long PlayerId, List<int> Ids)>();
+                    while (reader.Read())
+                    {
+                        long playerId = reader.GetInt64(0);
+                        var ids = new List<int>();
+
+                        for (int i = 0; i < usable.Count; i++)
+                        {
+                            if (reader.IsDBNull(i + 1)) continue;
+                            var json = reader.GetString(i + 1);
+                            if (string.IsNullOrWhiteSpace(json)) continue;
+
+                            try
+                            {
+                                var parsed = JsonConvert.DeserializeObject<List<int>>(json);
+                                if (parsed != null) ids.AddRange(parsed);
+                            }
+                            catch (JsonException)
+                            {
+                                // Leave a malformed legacy value alone rather than failing startup.
+                            }
+                        }
+
+                        if (ids.Count > 0)
+                            rows.Add((playerId, ids));
+                    }
+                    reader.Close();
+
+                    using (var write = connection.CreateCommand())
+                    {
+                        write.CommandText = "UPDATE PlayerInventory SET UnlockedItems = @Items WHERE PlayerId = @PlayerId";
+                        var itemsParam = write.Parameters.Add("@Items", SqliteType.Text);
+                        var idParam = write.Parameters.Add("@PlayerId", SqliteType.Integer);
+
+                        foreach (var (playerId, ids) in rows)
+                        {
+                            // Distinct: the same id could appear in two legacy columns.
+                            itemsParam.Value = JsonConvert.SerializeObject(ids.Distinct().OrderBy(x => x).ToList());
+                            idParam.Value = playerId;
+                            write.ExecuteNonQuery();
+                            migrated++;
+                        }
+                    }
+                }
+            }
+
+            Console.WriteLine($"[Database] Migrated owned items into UnlockedItems for {migrated} player(s) " +
+                              $"from {string.Join(", ", usable)}");
+        }
+
+        /// <summary>
+        /// One-time migration: the old single WeaponSkinId column applied to whichever gun was
+        /// in the primary slot. Copies it into the per-gun assignment table as the skin for that
+        /// player's primary weapon, so an existing assignment is not silently lost.
+        /// </summary>
+        private void FoldLegacyWeaponSkinIntoAssignments(SqliteConnection connection)
+        {
+            // Only run while the new table is still empty for that player.
+            int migrated = 0;
+            using (var read = connection.CreateCommand())
+            {
+                read.CommandText = @"
+                    SELECT l.PlayerId, l.PrimaryWeaponId, l.WeaponSkinId
+                    FROM PlayerLoadout l
+                    WHERE l.WeaponSkinId IS NOT NULL
+                      AND l.WeaponSkinId > 0
+                      AND NOT EXISTS (SELECT 1 FROM PlayerWeaponSkins s WHERE s.PlayerId = l.PlayerId)";
+                using (var reader = read.ExecuteReader())
+                {
+                    var rows = new List<(long PlayerId, int WeaponId, int SkinId)>();
+                    while (reader.Read())
+                    {
+                        rows.Add((reader.GetInt64(0), reader.GetInt32(1), reader.GetInt32(2)));
+                    }
+                    reader.Close();
+
+                    if (rows.Count == 0) return;
+
+                    using (var write = connection.CreateCommand())
+                    {
+                        write.CommandText = @"INSERT OR REPLACE INTO PlayerWeaponSkins
+                                              (PlayerId, WeaponId, SkinId, UpdatedAt)
+                                              VALUES (@PlayerId, @WeaponId, @SkinId, @UpdatedAt)";
+                        var p = write.Parameters.Add("@PlayerId", SqliteType.Integer);
+                        var w = write.Parameters.Add("@WeaponId", SqliteType.Integer);
+                        var s = write.Parameters.Add("@SkinId", SqliteType.Integer);
+                        write.Parameters.AddWithValue("@UpdatedAt", DateTime.UtcNow.ToString("o"));
+
+                        foreach (var (playerId, weaponId, skinId) in rows)
+                        {
+                            p.Value = playerId;
+                            w.Value = weaponId;
+                            s.Value = skinId;
+                            write.ExecuteNonQuery();
+                            migrated++;
+                        }
+                    }
+                }
+            }
+
+            if (migrated > 0)
+                Console.WriteLine($"[Database] Migrated legacy WeaponSkinId into per-gun assignments for {migrated} player(s)");
+        }
+
+        /// <summary>
+        /// Loads the per-gun skin assignments and the owned character skins for a profile.
+        ///
+        /// These live in their own tables rather than as columns on PlayerLoadout, so they are
+        /// fetched separately. Called while the profile reader is still open, on the same
+        /// connection.
+        /// </summary>
+        private void LoadLoadoutExtras(SqliteConnection connection, PlayerProfile profile)
+        {
+            if (profile?.Loadout == null) return;
+
+            profile.Loadout.WeaponSkins ??= new Dictionary<int, int>();
+            profile.Loadout.CharacterSkins ??= new List<int>();
+
+            using (var cmd = connection.CreateCommand())
+            {
+                cmd.CommandText = "SELECT WeaponId, SkinId FROM PlayerWeaponSkins WHERE PlayerId = @PlayerId";
+                cmd.Parameters.AddWithValue("@PlayerId", profile.PlayerId);
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    // Last write wins if a duplicate somehow exists; the primary key prevents it.
+                    profile.Loadout.WeaponSkins[reader.GetInt32(0)] = reader.GetInt32(1);
+                }
+            }
+
+            using (var cmd = connection.CreateCommand())
+            {
+                cmd.CommandText = @"SELECT SkinId FROM PlayerCharacterSkins
+                                    WHERE PlayerId = @PlayerId
+                                    ORDER BY SortOrder, SkinId";
+                cmd.Parameters.AddWithValue("@PlayerId", profile.PlayerId);
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    profile.Loadout.CharacterSkins.Add(reader.GetInt32(0));
+                }
+            }
+
+            // Never advertise wearing a skin the player does not own.
+            if (profile.Loadout.CharacterSkins.Count > 0
+                && !profile.Loadout.CharacterSkins.Contains(profile.Loadout.PlayerSkinId))
+            {
+                profile.Loadout.PlayerSkinId = profile.Loadout.CharacterSkins[0];
+            }
+        }
+
+        /// <summary>
+        /// Gives every player the character skin they are currently wearing.
+        ///
+        /// The list of owned character skins is new, so a player migrating from the old schema
+        /// had an empty list while PlayerSkinId still pointed at a skin. Without this they would
+        /// be wearing something they do not own, and any "is this skin owned" check would fail.
+        /// Idempotent: players who already own their worn skin are skipped.
+        /// </summary>
+        private void BackfillCharacterSkinsFromWorn(SqliteConnection connection)
+        {
+            int backfilled = 0;
+            using (var read = connection.CreateCommand())
+            {
+                read.CommandText = @"
+                    SELECT l.PlayerId, l.PlayerSkinId
+                    FROM PlayerLoadout l
+                    WHERE l.PlayerSkinId IS NOT NULL
+                      AND l.PlayerSkinId > 0
+                      AND NOT EXISTS (
+                          SELECT 1 FROM PlayerCharacterSkins s
+                          WHERE s.PlayerId = l.PlayerId AND s.SkinId = l.PlayerSkinId)";
+                using (var reader = read.ExecuteReader())
+                {
+                    var rows = new List<(long PlayerId, int SkinId)>();
+                    while (reader.Read())
+                        rows.Add((reader.GetInt64(0), reader.GetInt32(1)));
+                    reader.Close();
+
+                    if (rows.Count == 0) return;
+
+                    using var write = connection.CreateCommand();
+                    write.CommandText = @"INSERT OR REPLACE INTO PlayerCharacterSkins
+                                          (PlayerId, SkinId, SortOrder) VALUES (@PlayerId, @SkinId, 0)";
+                    var p = write.Parameters.Add("@PlayerId", SqliteType.Integer);
+                    var s = write.Parameters.Add("@SkinId", SqliteType.Integer);
+
+                    foreach (var (playerId, skinId) in rows)
+                    {
+                        p.Value = playerId;
+                        s.Value = skinId;
+                        write.ExecuteNonQuery();
+                        backfilled++;
+                    }
+                }
+            }
+
+            if (backfilled > 0)
+                Console.WriteLine($"[Database] Backfilled owned character skins for {backfilled} player(s)");
         }
 
         private PlayerProfile MapReaderToPlayerProfile(SqliteDataReader reader)
         {
-            return new PlayerProfile
+            var profile = new PlayerProfile
             {
                 PlayerId = reader.GetInt32(reader.GetOrdinal("PlayerId")),
                 Username = reader.GetString(reader.GetOrdinal("Username")),
@@ -579,9 +898,7 @@ namespace ServerFpsProjectZero.Networking
                 },
                 Inventory = new PlayerInventory
                 {
-                    OwnedWeapons = JsonConvert.DeserializeObject<List<int>>(reader.GetString(reader.GetOrdinal("OwnedWeapons"))),
-                    OwnedSkins = JsonConvert.DeserializeObject<List<int>>(reader.GetString(reader.GetOrdinal("OwnedSkins"))),
-                    OwnedGrenades = JsonConvert.DeserializeObject<List<int>>(reader.GetString(reader.GetOrdinal("OwnedGrenades"))),
+                    UnlockedItems = JsonConvert.DeserializeObject<List<int>>(reader.GetString(reader.GetOrdinal("UnlockedItems"))),
                     LootBoxes = JsonConvert.DeserializeObject<List<LootBox>>(reader.GetString(reader.GetOrdinal("LootBoxes"))),
                     CommonCrates = reader.GetInt32(reader.GetOrdinal("CommonCrates")),
                     RareCrates = reader.GetInt32(reader.GetOrdinal("RareCrates")),
@@ -595,13 +912,18 @@ namespace ServerFpsProjectZero.Networking
                     MeleeWeaponId = reader.GetInt32(reader.GetOrdinal("MeleeWeaponId")),
                     GrenadeId = reader.GetInt32(reader.GetOrdinal("GrenadeId")),
                     PlayerSkinId = reader.GetInt32(reader.GetOrdinal("PlayerSkinId")),
-                    WeaponSkinId = reader.GetInt32(reader.GetOrdinal("WeaponSkinId"))
+                    // Per-gun skins and character skins live in their own tables; loaded by
+                    // LoadLoadoutExtras so this mapper stays a pure column read.
+                    WeaponSkins = new Dictionary<int, int>(),
+                    CharacterSkins = new List<int>()
                 },
                 TotalPlayTime = TimeSpan.FromTicks(reader.GetInt64(reader.GetOrdinal("TotalPlayTimeTicks"))),
                 CreatedAt = DateTime.Parse(reader.GetString(reader.GetOrdinal("CreatedAt"))),
                 LastLogin = DateTime.Parse(reader.GetString(reader.GetOrdinal("LastLogin"))),
                 LoginStreak = reader.GetInt32(reader.GetOrdinal("LoginStreak"))
             };
+
+            return profile;
         }
 
         private bool UsernameExists(string username)
@@ -705,9 +1027,7 @@ namespace ServerFpsProjectZero.Networking
                 var command = connection.CreateCommand();
                 command.CommandText = @"
                     UPDATE PlayerInventory SET
-                        OwnedWeapons = @OwnedWeapons,
-                        OwnedSkins = @OwnedSkins,
-                        OwnedGrenades = @OwnedGrenades,
+                        UnlockedItems = @UnlockedItems,
                         LootBoxes = @LootBoxes,
                         CommonCrates = @CommonCrates,
                         RareCrates = @RareCrates,
@@ -715,9 +1035,7 @@ namespace ServerFpsProjectZero.Networking
                         LegendaryCrates = @LegendaryCrates
                     WHERE PlayerId = @PlayerId";
 
-                command.Parameters.AddWithValue("@OwnedWeapons", JsonConvert.SerializeObject(player.Inventory.OwnedWeapons));
-                command.Parameters.AddWithValue("@OwnedSkins", JsonConvert.SerializeObject(player.Inventory.OwnedSkins));
-                command.Parameters.AddWithValue("@OwnedGrenades", JsonConvert.SerializeObject(player.Inventory.OwnedGrenades));
+                command.Parameters.AddWithValue("@UnlockedItems", JsonConvert.SerializeObject(player.Inventory.UnlockedItems));
                 command.Parameters.AddWithValue("@LootBoxes", JsonConvert.SerializeObject(player.Inventory.LootBoxes));
                 command.Parameters.AddWithValue("@CommonCrates", player.Inventory.CommonCrates);
                 command.Parameters.AddWithValue("@RareCrates", player.Inventory.RareCrates);
@@ -726,6 +1044,111 @@ namespace ServerFpsProjectZero.Networking
                 command.Parameters.AddWithValue("@PlayerId", player.PlayerId);
 
                 command.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>
+        /// Persists the loadout: the slot assignments, the per-gun skin assignments, and the
+        /// owned character skins.
+        ///
+        /// The per-gun table is rewritten wholesale for this player rather than diffed - the map
+        /// is tiny, and a clean delete-and-insert cannot drift out of sync with the in-memory
+        /// state the way a partial update can.
+        /// </summary>
+        private void UpdatePlayerLoadout(Player player)
+        {
+            if (player.Loadout == null) return;
+
+            using (var connection = new SqliteConnection(connectionString))
+            {
+                connection.Open();
+                using var transaction = connection.BeginTransaction();
+
+                using (var command = connection.CreateCommand())
+                {
+                    command.Transaction = transaction;
+                    command.CommandText = @"
+                        UPDATE PlayerLoadout SET
+                            PrimaryWeaponId = @PrimaryWeaponId,
+                            SecondaryWeaponId = @SecondaryWeaponId,
+                            MeleeWeaponId = @MeleeWeaponId,
+                            GrenadeId = @GrenadeId,
+                            PlayerSkinId = @PlayerSkinId,
+                            UpdatedAt = @UpdatedAt
+                        WHERE PlayerId = @PlayerId";
+                    command.Parameters.AddWithValue("@PrimaryWeaponId", player.Loadout.PrimaryWeaponId);
+                    command.Parameters.AddWithValue("@SecondaryWeaponId", player.Loadout.SecondaryWeaponId);
+                    command.Parameters.AddWithValue("@MeleeWeaponId", player.Loadout.MeleeWeaponId);
+                    command.Parameters.AddWithValue("@GrenadeId", player.Loadout.GrenadeId);
+                    command.Parameters.AddWithValue("@PlayerSkinId", player.Loadout.PlayerSkinId);
+                    command.Parameters.AddWithValue("@UpdatedAt", DateTime.UtcNow.ToString("o"));
+                    command.Parameters.AddWithValue("@PlayerId", player.PlayerId);
+                    command.ExecuteNonQuery();
+                }
+
+                using (var command = connection.CreateCommand())
+                {
+                    command.Transaction = transaction;
+                    command.CommandText = "DELETE FROM PlayerWeaponSkins WHERE PlayerId = @PlayerId";
+                    command.Parameters.AddWithValue("@PlayerId", player.PlayerId);
+                    command.ExecuteNonQuery();
+                }
+
+                // Only positive skin ids are stored; 0 means "wearing the default skin", which is
+                // the absence of an assignment rather than an assignment to skin 0.
+                var skins = player.Loadout.WeaponSkins;
+                if (skins != null && skins.Count > 0)
+                {
+                    using var command = connection.CreateCommand();
+                    command.Transaction = transaction;
+                    command.CommandText = @"INSERT OR REPLACE INTO PlayerWeaponSkins
+                                            (PlayerId, WeaponId, SkinId, UpdatedAt)
+                                            VALUES (@PlayerId, @WeaponId, @SkinId, @UpdatedAt)";
+                    var p = command.Parameters.Add("@PlayerId", SqliteType.Integer);
+                    var w = command.Parameters.Add("@WeaponId", SqliteType.Integer);
+                    var s = command.Parameters.Add("@SkinId", SqliteType.Integer);
+                    command.Parameters.AddWithValue("@UpdatedAt", DateTime.UtcNow.ToString("o"));
+
+                    foreach (var pair in skins)
+                    {
+                        if (pair.Value <= 0) continue;
+                        p.Value = player.PlayerId;
+                        w.Value = pair.Key;
+                        s.Value = pair.Value;
+                        command.ExecuteNonQuery();
+                    }
+                }
+
+                using (var command = connection.CreateCommand())
+                {
+                    command.Transaction = transaction;
+                    command.CommandText = "DELETE FROM PlayerCharacterSkins WHERE PlayerId = @PlayerId";
+                    command.Parameters.AddWithValue("@PlayerId", player.PlayerId);
+                    command.ExecuteNonQuery();
+                }
+
+                var characters = player.Loadout.CharacterSkins;
+                if (characters != null && characters.Count > 0)
+                {
+                    using var command = connection.CreateCommand();
+                    command.Transaction = transaction;
+                    command.CommandText = @"INSERT OR REPLACE INTO PlayerCharacterSkins
+                                            (PlayerId, SkinId, SortOrder)
+                                            VALUES (@PlayerId, @SkinId, @SortOrder)";
+                    var p = command.Parameters.Add("@PlayerId", SqliteType.Integer);
+                    var s = command.Parameters.Add("@SkinId", SqliteType.Integer);
+                    var o = command.Parameters.Add("@SortOrder", SqliteType.Integer);
+
+                    for (int i = 0; i < characters.Count; i++)
+                    {
+                        p.Value = player.PlayerId;
+                        s.Value = characters[i];
+                        o.Value = i;
+                        command.ExecuteNonQuery();
+                    }
+                }
+
+                transaction.Commit();
             }
         }
 
@@ -973,6 +1396,7 @@ namespace ServerFpsProjectZero.Networking
                 // Save to database
                 UpdatePlayerProfile(player);
                 UpdatePlayerInventory(player);
+                UpdatePlayerLoadout(player);
 
                 Console.WriteLine($"[LoginManager] {player.Username} updated stats - Kills: {player.Kills}, Deaths: {player.Deaths}");
             }
@@ -1004,6 +1428,7 @@ namespace ServerFpsProjectZero.Networking
             // Save player data to database before disconnecting
             UpdatePlayerProfile(player);
             UpdatePlayerInventory(player);
+            UpdatePlayerLoadout(player);
 
             // Update player state
             player.IsConnected = false;

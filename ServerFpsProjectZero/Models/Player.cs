@@ -123,11 +123,17 @@ namespace ServerFpsProjectZero.Models
             EpicShards = 0;
             LegendaryShards = 0;
 
-            // Initialize with default items
+            // Initialize with default items.
+            //
+            // ITEM ID CONVENTION - ids are globally unique across every item type:
+            //     1     - 999    weapons, including grenades and melee
+            //     1000  - 1999   skins
+            //     2000+          reserved
+            // 1..4 matches the client's own weapon registry (WeaponManager.LoadWeaponData):
+            // 1 Assault Rifle, 2 Pistol, 3 Combat Knife, 4 Frag Grenade. Grenades are a
+            // WeaponType here, so they live in the weapon range rather than their own.
             Inventory = new PlayerInventory();
-            Inventory.OwnedWeapons = new List<int> { 1, 2, 3, 4 };
-            Inventory.OwnedSkins = new List<int> { 1 };
-            Inventory.OwnedGrenades = new List<int> { 4 };
+            Inventory.UnlockedItems = new List<int> { 1, 2, 3, 4, 1001 };
             Inventory.LootBoxes = new List<LootBox>();
 
             Loadout = new PlayerLoadout();
@@ -268,45 +274,36 @@ namespace ServerFpsProjectZero.Models
             else Rank = 10;
         }
 
-        public bool HasItem(int itemId, string itemType)
+        /// <summary>
+        /// True when the player has unlocked this item.
+        ///
+        /// Item ids are globally unique across every item type, so ownership is a single
+        /// Contains against one flat list. This previously needed an itemType string and
+        /// switched on it, which meant a typo silently reported "not owned" and could not be
+        /// used to validate the loadout (whose ids carry no type at all).
+        /// </summary>
+        public bool HasItem(int itemId)
         {
-            return itemType switch
-            {
-                "weapon" => Inventory.OwnedWeapons.Contains(itemId),
-                "skin" => Inventory.OwnedSkins.Contains(itemId),
-                "grenade" => Inventory.OwnedGrenades.Contains(itemId),
-                _ => false
-            };
+            return Inventory != null
+                && Inventory.UnlockedItems != null
+                && Inventory.UnlockedItems.Contains(itemId);
         }
 
-        public void AddItem(int itemId, string itemType)
+        /// <summary>Unlocks an item. Idempotent - owning something twice is not meaningful.</summary>
+        public void UnlockItem(int itemId)
         {
-            switch (itemType)
-            {
-                case "weapon":
-                    if (!Inventory.OwnedWeapons.Contains(itemId))
-                        Inventory.OwnedWeapons.Add(itemId);
-                    break;
-                case "skin":
-                    if (!Inventory.OwnedSkins.Contains(itemId))
-                        Inventory.OwnedSkins.Add(itemId);
-                    break;
-                case "grenade":
-                    if (!Inventory.OwnedGrenades.Contains(itemId))
-                        Inventory.OwnedGrenades.Add(itemId);
-                    break;
-            }
+            if (Inventory == null) return;
+            if (Inventory.UnlockedItems == null) Inventory.UnlockedItems = new List<int>();
+            if (!Inventory.UnlockedItems.Contains(itemId))
+                Inventory.UnlockedItems.Add(itemId);
         }
 
-        public bool RemoveItem(int itemId, string itemType)
+        /// <summary>Removes a previously unlocked item.</summary>
+        public bool RemoveItem(int itemId)
         {
-            return itemType switch
-            {
-                "weapon" => Inventory.OwnedWeapons.Remove(itemId),
-                "skin" => Inventory.OwnedSkins.Remove(itemId),
-                "grenade" => Inventory.OwnedGrenades.Remove(itemId),
-                _ => false
-            };
+            return Inventory != null
+                && Inventory.UnlockedItems != null
+                && Inventory.UnlockedItems.Remove(itemId);
         }
 
         public void ReportCheatViolation(string violation)
