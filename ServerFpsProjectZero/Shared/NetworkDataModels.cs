@@ -1095,6 +1095,12 @@ namespace ServerFpsProjectZero.Shared
     {
         public string type;
         public string token;
+
+        /// <summary>
+        /// Which mode this party is for. Co-op runs live in their own lobby list, so a party
+        /// created here is only joinable by someone looking for the same mode.
+        /// </summary>
+        public GameType gameType = GameType.TeamDeathmatch;
     }
 
     [Serializable]
@@ -1216,6 +1222,13 @@ namespace ServerFpsProjectZero.Shared
         public List<LobbyMemberInfo> members;
         public string status;        // "waiting" | "starting" | "closed"
         public string message;
+
+        /// <summary>Mode this party will play, so the client can label it.</summary>
+        public GameType gameType = GameType.TeamDeathmatch;
+
+        /// <summary>How many players this mode accepts. Co-op takes more than a duel.</summary>
+        public int maxPlayers = 2;
+
         public DateTime timestamp;
     }
 

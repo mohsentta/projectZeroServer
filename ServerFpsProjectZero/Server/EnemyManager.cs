@@ -205,10 +205,10 @@ namespace ServerFpsProjectZero.Server
 
             runTime += deltaSeconds;
 
-            // A run with nobody standing is over.
+            // A run with nobody in the world is not over - it has not started. Ending here was
+            // ending the run at wave 0, before the first player's position had been reported.
             if (players.Count == 0)
             {
-                Phase = EnemyPhase.Finished;
                 return;
             }
 

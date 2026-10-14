@@ -71,17 +71,23 @@ namespace ServerFpsProjectZero.Server
                 return;
             }
 
+            // The mode is fixed at creation. Co-op parties get their own capacity and will start
+            // a survival run rather than a duel.
+            var mode = req?.gameType ?? GameType.TeamDeathmatch;
+
             var lobby = new Lobby
             {
                 LobbyId = GenerateLobbyCode(),
                 HostPlayerId = player.PlayerId,
-                CreatedAt = DateTime.UtcNow
+                CreatedAt = DateTime.UtcNow,
+                GameType = mode
             };
             lobby.Members.Add(player);
 
             if (lobbies.TryAdd(lobby.LobbyId, lobby))
             {
-                Console.WriteLine($"[Lobby] {player.Username} created lobby {lobby.LobbyId}");
+                Console.WriteLine($"[Lobby] {player.Username} created {mode} lobby {lobby.LobbyId} " +
+                                  $"(capacity {lobby.Capacity})");
                 BroadcastLobbyUpdate(lobby);
             }
             else
@@ -119,7 +125,7 @@ namespace ServerFpsProjectZero.Server
                     return;
                 }
 
-                if (lobby.Members.Count >= Lobby.MaxPlayers)
+                if (lobby.Members.Count >= lobby.Capacity)
                 {
                     SendLobbyError(endpoint, "Lobby is full");
                     return;
@@ -249,7 +255,7 @@ namespace ServerFpsProjectZero.Server
             Console.WriteLine($"[Lobby] Lobby {lobby.LobbyId} starting ({members.Count} players)");
 
             // Reuse the matchmaking authority path.
-            gameManager.CreateGame(members, GameType.TeamDeathmatch, Map.Office);
+            gameManager.CreateGame(members, lobby.GameType, Map.Office);
 
             // Tell any remaining clients the lobby is closed.
             BroadcastLobbyUpdate(lobby, status: "closed", message: "Game starting");
@@ -321,7 +327,7 @@ namespace ServerFpsProjectZero.Server
                     return;
                 }
 
-                if (lobby.Members.Count >= Lobby.MaxPlayers)
+                if (lobby.Members.Count >= lobby.Capacity)
                 {
                     SendInviteResult(endpoint, false, target.PlayerId, target.Username, "Your party is full");
                     return;
@@ -355,7 +361,7 @@ namespace ServerFpsProjectZero.Server
                 fromPlayerId = inviter.PlayerId,
                 fromUsername = inviter.Username,
                 memberCount = memberCount,
-                maxPlayers = Lobby.MaxPlayers,
+                maxPlayers = lobby.Capacity,
                 timestamp = DateTime.UtcNow
             }, targetClient);
 
@@ -412,7 +418,7 @@ namespace ServerFpsProjectZero.Server
             bool joined = false;
             lock (lobby.Sync)
             {
-                if (lobby.Status == "waiting" && lobby.Members.Count < Lobby.MaxPlayers &&
+                if (lobby.Status == "waiting" && lobby.Members.Count < lobby.Capacity &&
                     !lobby.Members.Any(m => m.PlayerId == invitee.PlayerId))
                 {
                     lobby.Members.Add(invitee);
@@ -603,6 +609,8 @@ namespace ServerFpsProjectZero.Server
                 members = members,
                 status = effectiveStatus,
                 message = message ?? "",
+                gameType = lobby.GameType,
+                maxPlayers = lobby.Capacity,
                 timestamp = DateTime.UtcNow
             };
         }
@@ -646,12 +654,30 @@ namespace ServerFpsProjectZero.Server
 
     public class Lobby
     {
+        /// <summary>Team deathmatch is a duel.</summary>
         public const int MaxPlayers = 2;
+
+        /// <summary>
+        /// Co-op accepts a full squad, since the enemies scale with the players present and
+        /// there is no opposing team to balance against.
+        /// </summary>
+        public const int MaxCoopPlayers = 4;
 
         public string LobbyId { get; set; }
         public int HostPlayerId { get; set; }
         public DateTime CreatedAt { get; set; }
         public string Status { get; set; } = "waiting"; // waiting | starting | closed
+
+        /// <summary>
+        /// Mode this party will play. Set at creation and never changed: a party is either a
+        /// duel or a co-op run, and the lobby list is filtered by it so players looking for one
+        /// mode never see the other.
+        /// </summary>
+        public GameType GameType { get; set; } = GameType.TeamDeathmatch;
+
+        /// <summary>Capacity for this lobby's mode.</summary>
+        public int Capacity => GameType == GameType.CoopSurvival ? MaxCoopPlayers : MaxPlayers;
+
         public List<Player> Members { get; } = new List<Player>();
         public Dictionary<int, bool> Ready { get; } = new Dictionary<int, bool>();
         public readonly object Sync = new object();

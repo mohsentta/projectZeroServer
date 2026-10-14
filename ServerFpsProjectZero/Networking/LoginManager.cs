@@ -1783,6 +1783,44 @@ namespace ServerFpsProjectZero.Networking
 
         #region Public Methods
 
+        /// <summary>
+        /// Persists just the four shard columns for one account.
+        ///
+        /// Separate from UpdatePlayerProfile on purpose: shards are granted mid-run, by a drop,
+        /// and a full profile write from the game-loop thread would race the packet handlers that
+        /// also write the profile. This touches only the four columns it owns.
+        /// </summary>
+        public void UpdatePlayerShards(Player player)
+        {
+            if (player == null) return;
+
+            try
+            {
+                using var connection = new SqliteConnection(connectionString);
+                connection.Open();
+                using var command = connection.CreateCommand();
+                command.CommandText = @"
+                    UPDATE Players SET
+                        CommonShards = @CommonShards,
+                        RareShards = @RareShards,
+                        EpicShards = @EpicShards,
+                        LegendaryShards = @LegendaryShards
+                    WHERE PlayerId = @PlayerId";
+                command.Parameters.AddWithValue("@CommonShards", player.CommonShards);
+                command.Parameters.AddWithValue("@RareShards", player.RareShards);
+                command.Parameters.AddWithValue("@EpicShards", player.EpicShards);
+                command.Parameters.AddWithValue("@LegendaryShards", player.LegendaryShards);
+                command.Parameters.AddWithValue("@PlayerId", player.PlayerId);
+                command.ExecuteNonQuery();
+            }
+            catch (SqliteException ex)
+            {
+                // A failed shard write must not take the run down; the in-memory balance is still
+                // correct, and the next logout writes the full profile.
+                Console.WriteLine($"[Database] Failed to persist shards for {player.Username}: {ex.Message}");
+            }
+        }
+
         public Player GetPlayerByToken(string token)
         {
             tokenToPlayer.TryGetValue(token, out Player player);

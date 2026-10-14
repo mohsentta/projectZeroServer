@@ -172,6 +172,15 @@ namespace ServerFpsProjectZero.Server
 
             activeGames.TryAdd(gameId, gameRoom);
 
+            // A co-op run owns an enemy simulation; every other game type leaves it null, and
+            // that null is what routes the game loop down the PvP path.
+            if (gameType == GameType.CoopSurvival)
+            {
+                gameRoom.Enemies = new EnemyManager(gameId);
+                Console.WriteLine($"[Coop] Game {gameId} starting a survival run for " +
+                                  $"{redTeam.Count + blueTeam.Count} player(s)");
+            }
+
             // Notify all players about game start
             foreach (var player in redTeam.Concat(blueTeam))
             {
@@ -256,6 +265,14 @@ namespace ServerFpsProjectZero.Server
                 var elapsed = (DateTime.UtcNow - game.StartTime).TotalSeconds;
                 game.TimeRemaining = GAME_DURATION - elapsed;
 
+                // Co-op runs its own loop: there are no team scores to win with, so the run ends
+                // when the enemies finish the players rather than on the clock alone.
+                if (game.GameType == GameType.CoopSurvival)
+                {
+                    TickCoop(game);
+                    continue;
+                }
+
                 if (game.TimeRemaining <= 0 || game.RedScore >= 10 || game.BlueScore >= 10)
                 {
                     EndGame(game);
@@ -266,8 +283,343 @@ namespace ServerFpsProjectZero.Server
             }
         }
 
-        private void SendGameState(GameRoom game)
+        /// <summary>
+        /// Resolves a shot that named a co-op enemy.
+        ///
+        /// Line of sight is the client's call, exactly as it is for player targets - the server
+        /// holds no map geometry. What the server enforces: the game must be a co-op run, the
+        /// enemy must exist and be alive, and the shooter must be within weapon range of it.
+        /// </summary>
+        private void HandleEnemyShot(GameRoom game, ClientConnection client, ShootInput input)
         {
+            if (game.Enemies == null)
+            {
+                // A player-target shot in a co-op run, or an enemy id sent during PvP. Either way
+                // there is nothing to damage.
+                if (ShootDebug)
+                    Console.WriteLine($"[Shoot] ignored: game {game.GameId} has no enemies (type {game.GameType})");
+
+                return;
+            }
+
+            if (!game.PlayerPositions.TryGetValue(client.PlayerId, out var shooterPos))
+            {
+                if (ShootDebug)
+                    Console.WriteLine($"[Shoot] ignored: no known position for {client.Username}");
+
+                return;
+            }
+
+            var target = game.Enemies.LiveEnemies.FirstOrDefault(e => e.EnemyId == input.hitEnemyId);
+            if (target == null)
+            {
+                if (ShootDebug)
+                    Console.WriteLine($"[Shoot] ignored: enemy {input.hitEnemyId} does not exist or is already dead");
+
+                return;
+            }
+
+            // Range check. The client reports where its ray hit, which for an enemy is on the
+            // enemy's body, so measure shooter to that point rather than to the enemy's feet.
+            float dx = input.targetX - shooterPos.x;
+            float dy = input.targetY - shooterPos.y;
+            float dz = input.targetZ - shooterPos.z;
+            float distance = (float)Math.Sqrt(dx * dx + dy * dy + dz * dz);
+
+            const float MAX_ENEMY_RANGE = 200f;
+            if (distance > MAX_ENEMY_RANGE)
+            {
+                if (ShootDebug)
+                    Console.WriteLine($"[Shoot] ignored: enemy {target.EnemyId} is {distance:0.#}m away " +
+                                      $"(max {MAX_ENEMY_RANGE})");
+
+                return;
+            }
+
+            int damage = CalculateDamage(input.weaponId, distance, isHeadshot: false);
+
+            EnemyDeathEvent death;
+            lock (game.StateLock)
+            {
+                death = game.Enemies.ApplyDamage(target.EnemyId, damage, client.PlayerId, client.Username);
+            }
+
+            if (ShootDebug)
+            {
+                Console.WriteLine($"[Shoot] {client.Username} hit enemy {target.EnemyId} " +
+                                  $"(level {target.Level}) for {damage} at {distance:0.#}m " +
+                                  $"-> health {Math.Max(0, target.Health)}/{target.MaxHealth}" +
+                                  (death != null ? " KILL" : ""));
+            }
+
+            if (death != null)
+                HandleEnemyDeath(game, death);
+        }
+
+        /// <summary>
+        /// One tick of a co-op run: advance the enemies, resolve their swings against players,
+        /// roll shard drops for anything the players killed, and broadcast the result.
+        /// </summary>
+        private void TickCoop(GameRoom game)
+        {
+            if (game.Enemies == null)
+                return;
+
+            var players = BuildCoopSnapshots(game);
+
+            game.Enemies.Tick((float)TICK_TIME, players, out var deaths, out var attacks);
+
+            // Enemy swings. Damage is applied here, not in the simulation, so all mutation of
+            // player state stays under the same lock the PvP path uses.
+            foreach (var attack in attacks)
+                ApplyEnemyAttack(game, attack);
+
+            // Enemy deaths, including the shard roll.
+            foreach (var death in deaths)
+                HandleEnemyDeath(game, death);
+
+            // Broadcast the state of the world.
+            var wave = game.Enemies.WaveState(players.Count);
+            var snapshot = game.Enemies.Snapshot();
+
+            foreach (var player in game.RedTeam.Concat(game.BlueTeam))
+            {
+                if (!player.InGame || !player.IsConnected) continue;
+
+                serverManager.SendPacket(new CoopEnemyStateUpdate
+                {
+                    enemies = snapshot,
+                    serverTick = DateTime.UtcNow.Ticks,
+                }, player);
+
+                serverManager.SendPacket(wave, player);
+            }
+
+            // A run ends when nobody is left standing. Note this asks about participants rather
+            // than about snapshots: a player whose first movement packet has not arrived yet has
+            // no known position and therefore no snapshot, and treating that as "down" ended the
+            // run at wave 0 the instant the match started.
+            var participants = game.RedTeam.Concat(game.BlueTeam)
+                .Where(p => p.InGame && p.IsConnected)
+                .ToList();
+
+            bool anyAlive = participants.Any(p =>
+                !game.PlayerStates.TryGetValue(p.PlayerId, out var s) || s.isAlive);
+
+            if (participants.Count == 0 || !anyAlive || game.Enemies.IsFinished)
+            {
+                EndCoopRun(game);
+            }
+        }
+
+        /// <summary>Alive players and their authoritative positions, for the enemy simulation.</summary>
+        private List<CoopPlayerSnapshot> BuildCoopSnapshots(GameRoom game)
+        {
+            var snapshots = new List<CoopPlayerSnapshot>();
+
+            foreach (var player in game.RedTeam.Concat(game.BlueTeam))
+            {
+                if (!player.InGame || !player.IsConnected) continue;
+
+                if (game.PlayerStates.TryGetValue(player.PlayerId, out var state) && !state.isAlive)
+                    continue;
+
+                if (!game.PlayerPositions.TryGetValue(player.PlayerId, out var position))
+                    continue;
+
+                snapshots.Add(new CoopPlayerSnapshot
+                {
+                    PlayerId = player.PlayerId,
+                    X = position.x,
+                    Y = position.y,
+                    Z = position.z,
+                    Health = state?.health ?? 100,
+                });
+            }
+
+            return snapshots;
+        }
+
+        /// <summary>Applies one enemy swing to its target, and reports the hit.</summary>
+        private void ApplyEnemyAttack(GameRoom game, EnemyAttackEvent attack)
+        {
+            var victim = game.RedTeam.Concat(game.BlueTeam)
+                .FirstOrDefault(p => p.PlayerId == attack.TargetPlayerId);
+            if (victim == null) return;
+
+            HitData hitData;
+            bool killed = false;
+
+            lock (game.StateLock)
+            {
+                if (!game.PlayerStates.TryGetValue(victim.PlayerId, out var state) || !state.isAlive)
+                    return;
+
+                state.health -= attack.Damage;
+                killed = state.health <= 0;
+                if (killed) state.health = 0;
+
+                hitData = new HitData
+                {
+                    type = "player_hit",
+                    // attackerId 0 marks "not a player" - the client uses this to distinguish an
+                    // enemy hit from a player's, and to avoid looking up a player that is not there.
+                    attackerId = 0,
+                    attackerName = "enemy",
+                    targetId = victim.PlayerId,
+                    targetName = victim.Username,
+                    damage = attack.Damage,
+                    weaponId = 0,
+                    isHeadshot = false,
+                    isKill = killed,
+                    timestamp = DateTime.UtcNow,
+                };
+            }
+
+            serverManager.SendPacket(hitData, victim);
+
+            if (killed)
+            {
+                HandlePlayerDeath(victim, game);
+                BroadcastCoop(new
+                {
+                    type = "coop_player_down",
+                    playerId = victim.PlayerId,
+                    username = victim.Username,
+                    timestamp = DateTime.UtcNow,
+                }, game);
+            }
+        }
+
+        /// <summary>
+        /// Credits an enemy kill: the killer's run totals, their persistent shard balance, and
+        /// the death broadcast.
+        /// </summary>
+        private void HandleEnemyDeath(GameRoom game, EnemyDeathEvent death)
+        {
+            int killerShardBalance = 0;
+
+            if (death.DroppedShards && death.KillerPlayerId >= 0)
+            {
+                // Run totals, for the end-of-run summary.
+                var earned = game.CoopShards.GetOrAdd(death.KillerPlayerId, _ => new int[4]);
+                lock (game.StateLock)
+                {
+                    earned[(int)death.Tier] += death.ShardsGranted;
+                }
+
+                // Persistent balance, so shards survive the run.
+                var account = loginManager?.GetPlayerById(death.KillerPlayerId);
+                if (account != null)
+                {
+                    switch (death.Tier)
+                    {
+                        case ShardTier.Common: account.CommonShards += death.ShardsGranted; break;
+                        case ShardTier.Rare: account.RareShards += death.ShardsGranted; break;
+                        case ShardTier.Epic: account.EpicShards += death.ShardsGranted; break;
+                        case ShardTier.Legendary: account.LegendaryShards += death.ShardsGranted; break;
+                    }
+
+                    killerShardBalance = death.Tier switch
+                    {
+                        ShardTier.Common => account.CommonShards,
+                        ShardTier.Rare => account.RareShards,
+                        ShardTier.Epic => account.EpicShards,
+                        _ => account.LegendaryShards,
+                    };
+
+                    // Persist immediately: a shard should not be lost because the server dies
+                    // before the player logs out.
+                    loginManager.UpdatePlayerShards(account);
+                }
+
+                if (ShootDebug)
+                {
+                    Console.WriteLine($"[Coop] {death.KillerName} killed a level {death.Enemy.Level} enemy " +
+                                      $"-> {death.ShardsGranted}x {death.Tier} shards (balance {killerShardBalance})");
+                }
+            }
+
+            var deathPacket = new CoopEnemyDeath
+            {
+                enemyId = death.Enemy.EnemyId,
+                enemyLevel = death.Enemy.Level,
+                killerPlayerId = death.KillerPlayerId,
+                killerName = death.KillerName,
+                killed = death.Killed,
+                droppedShards = death.DroppedShards,
+                shardsGranted = death.ShardsGranted,
+                tier = death.Tier,
+                killerShardBalance = killerShardBalance,
+                x = death.Enemy.X,
+                y = death.Enemy.Y,
+                z = death.Enemy.Z,
+            };
+
+            BroadcastCoop(deathPacket, game);
+
+            // Tell the killer their own balance changed, so the HUD can update without a re-login.
+            if (death.DroppedShards && death.KillerPlayerId >= 0)
+            {
+                var killer = game.RedTeam.Concat(game.BlueTeam)
+                    .FirstOrDefault(p => p.PlayerId == death.KillerPlayerId);
+                var account = loginManager?.GetPlayerById(death.KillerPlayerId);
+
+                if (killer != null && account != null)
+                {
+                    serverManager.SendPacket(new ShardBalanceUpdate
+                    {
+                        commonShards = account.CommonShards,
+                        rareShards = account.RareShards,
+                        epicShards = account.EpicShards,
+                        legendaryShards = account.LegendaryShards,
+                        granted = true,
+                        grantedAmount = death.ShardsGranted,
+                        grantedTier = death.Tier,
+                    }, killer);
+                }
+            }
+        }
+
+        /// <summary>Emits the end-of-run summary and closes the game.</summary>
+        private void EndCoopRun(GameRoom game)
+        {
+            if (game.Enemies == null) return;
+
+            foreach (var player in game.RedTeam.Concat(game.BlueTeam))
+            {
+                if (!player.IsConnected) continue;
+
+                var earned = game.CoopShards.TryGetValue(player.PlayerId, out var totals)
+                    ? totals : new int[4];
+
+                serverManager.SendPacket(new CoopRunSummary
+                {
+                    wavesSurvived = game.Enemies.WaveNumber,
+                    enemiesKilled = game.Enemies.KillsBy(player.PlayerId),
+                    commonShards = earned[(int)ShardTier.Common],
+                    rareShards = earned[(int)ShardTier.Rare],
+                    epicShards = earned[(int)ShardTier.Epic],
+                    legendaryShards = earned[(int)ShardTier.Legendary],
+                }, player);
+            }
+
+            Console.WriteLine($"[Coop] Game {game.GameId} run over at wave {game.Enemies.WaveNumber}");
+
+            // Reuse the normal teardown; the co-op path just does not compute a winner.
+            EndGame(game);
+        }
+
+        private void BroadcastCoop(object packet, GameRoom game)
+        {
+            foreach (var player in game.RedTeam.Concat(game.BlueTeam))
+            {
+                if (player.InGame && player.IsConnected)
+                    serverManager.SendPacket(packet, player);
+            }
+        }
+
+        private void SendGameState(GameRoom game)        {
             foreach (var player in game.RedTeam.Concat(game.BlueTeam))
             {
                 if (!player.InGame || !player.IsConnected)
@@ -428,6 +780,15 @@ namespace ServerFpsProjectZero.Server
 
             if (!activeGames.TryGetValue(client.CurrentGameId, out var game))
                 return;
+
+            // A shot names either a player or a co-op enemy, never both: they are different id
+            // spaces resolved by different managers. Enemy hits are handled first and return,
+            // so the player-target logic below stays exactly as it was.
+            if (input.hitEnemyId >= 0)
+            {
+                HandleEnemyShot(game, client, input);
+                return;
+            }
 
             // Reject non-finite shoot coordinates (see movement handler).
             if (!IsFinite(input.originX, input.originY, input.originZ) ||
@@ -1093,6 +1454,15 @@ namespace ServerFpsProjectZero.Server
         public ConcurrentDictionary<int, Vector3Data> PlayerPositions { get; set; } = new ConcurrentDictionary<int, Vector3Data>();
         public ConcurrentDictionary<int, Vector2Data> PlayerRotations { get; set; } = new ConcurrentDictionary<int, Vector2Data>();
         public ConcurrentDictionary<int, PlayerStateInfo> PlayerStates { get; set; } = new ConcurrentDictionary<int, PlayerStateInfo>();
+
+        /// <summary>
+        /// Enemy simulation for a co-op run. Null for every other game type, which is what
+        /// distinguishes the two loops.
+        /// </summary>
+        public EnemyManager Enemies { get; set; }
+
+        /// <summary>Shard totals earned per player during this run, mirrored to persistent balances as they drop.</summary>
+        public ConcurrentDictionary<int, int[]> CoopShards { get; set; } = new ConcurrentDictionary<int, int[]>();
     }
 
     public class InGameStats
