@@ -43,6 +43,13 @@ namespace ServerFpsProjectZero.Models
         public int Gold { get; set; }
         public int Money { get; set; }
 
+        // Shards, one pool per rarity (see PlayerProfile). Crafting currency, not spendable
+        // on the shop in the same way Gold is.
+        public int CommonShards { get; set; }
+        public int RareShards { get; set; }
+        public int EpicShards { get; set; }
+        public int LegendaryShards { get; set; }
+
         // Equipment & Customization
         public PlayerLoadout Loadout { get; set; }
         public PlayerInventory Inventory { get; set; }
@@ -109,6 +116,12 @@ namespace ServerFpsProjectZero.Models
             ExperienceToNextLevel = CalculateExperienceNeeded(2);
             Gold = 500;
             Money = 500;
+
+            // New accounts start with no shards - they are earned.
+            CommonShards = 0;
+            RareShards = 0;
+            EpicShards = 0;
+            LegendaryShards = 0;
 
             // Initialize with default items
             Inventory = new PlayerInventory();
@@ -352,6 +365,13 @@ namespace ServerFpsProjectZero.Models
                 Experience = this.Experience,
                 ExperienceToNextLevel = this.ExperienceToNextLevel,
                 Gold = this.Gold,
+                // Money was missing here, so it was read from the database but never actually
+                // sent to the client. Mapped now alongside the shards.
+                Money = this.Money,
+                CommonShards = this.CommonShards,
+                RareShards = this.RareShards,
+                EpicShards = this.EpicShards,
+                LegendaryShards = this.LegendaryShards,
                 MMR = this.MMR,
                 Rank = this.Rank,
                 TotalStats = this.Stats,

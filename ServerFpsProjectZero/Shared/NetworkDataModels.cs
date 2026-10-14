@@ -91,6 +91,14 @@ namespace ServerFpsProjectZero.Shared
         public int ExperienceToNextLevel { get; set; }
         public int Gold { get; set; }
         public int Money { get; set; }
+
+        // Shards, one pool per rarity. Used for crafting/upgrading rather than direct purchase,
+        // which is why they are separate pools instead of a single balance plus a tier.
+        public int CommonShards { get; set; }
+        public int RareShards { get; set; }
+        public int EpicShards { get; set; }
+        public int LegendaryShards { get; set; }
+
         public int MMR { get; set; }
         public int Rank { get; set; }
         public PlayerStats TotalStats { get; set; }

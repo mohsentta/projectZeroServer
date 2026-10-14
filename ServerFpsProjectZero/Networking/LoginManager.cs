@@ -176,6 +176,10 @@ namespace ServerFpsProjectZero.Networking
                         ExperienceToNextLevel INTEGER DEFAULT 150,
                         Gold INTEGER DEFAULT 500,
                         Money REAL DEFAULT 0.0,
+                        CommonShards INTEGER DEFAULT 0,
+                        RareShards INTEGER DEFAULT 0,
+                        EpicShards INTEGER DEFAULT 0,
+                        LegendaryShards INTEGER DEFAULT 0,
                         MMR INTEGER DEFAULT 1000,
                         Rank INTEGER DEFAULT 1,
                         TotalMatches INTEGER DEFAULT 0,
@@ -193,6 +197,15 @@ namespace ServerFpsProjectZero.Networking
                         LoginStreak INTEGER DEFAULT 0
                     )";
                 command.ExecuteNonQuery();
+
+                // Add columns introduced after a database may already exist. CREATE TABLE IF
+                // NOT EXISTS silently does nothing for an existing table, so without this an
+                // older FPSGame.db would never gain the new columns and every SELECT against
+                // them would throw "no such column".
+                AddColumnIfMissing(connection, "Players", "CommonShards", "INTEGER DEFAULT 0");
+                AddColumnIfMissing(connection, "Players", "RareShards", "INTEGER DEFAULT 0");
+                AddColumnIfMissing(connection, "Players", "EpicShards", "INTEGER DEFAULT 0");
+                AddColumnIfMissing(connection, "Players", "LegendaryShards", "INTEGER DEFAULT 0");
 
                 // Create inventory table
                 command.CommandText = @"
@@ -307,12 +320,14 @@ namespace ServerFpsProjectZero.Networking
                         INSERT INTO Players (
                             Username, Email, PasswordHash, Salt, Level, Experience, 
                             ExperienceToNextLevel, Gold, MMR, Rank,
+                            CommonShards, RareShards, EpicShards, LegendaryShards,
                             TotalMatches, TotalWins, TotalLosses, TotalKills, TotalDeaths,
                             TotalHeadshots, TotalAssists, WinRate, KDRatio,
                             TotalPlayTimeTicks, CreatedAt, LastLogin
                         ) VALUES (
                             @Username, @Email, @PasswordHash, @Salt, @Level, @Experience,
                             @ExperienceToNextLevel, @Gold, @MMR, @Rank,
+                            @CommonShards, @RareShards, @EpicShards, @LegendaryShards,
                             @TotalMatches, @TotalWins, @TotalLosses, @TotalKills, @TotalDeaths,
                             @TotalHeadshots, @TotalAssists, @WinRate, @KDRatio,
                             @TotalPlayTimeTicks, @CreatedAt, @LastLogin
@@ -328,6 +343,10 @@ namespace ServerFpsProjectZero.Networking
                     command.Parameters.AddWithValue("@Gold", gold);
                     command.Parameters.AddWithValue("@MMR", mmr);
                     command.Parameters.AddWithValue("@Rank", CalculateRankFromMMR(mmr));
+                    command.Parameters.AddWithValue("@CommonShards", 0);
+                    command.Parameters.AddWithValue("@RareShards", 0);
+                    command.Parameters.AddWithValue("@EpicShards", 0);
+                    command.Parameters.AddWithValue("@LegendaryShards", 0);
                     command.Parameters.AddWithValue("@TotalMatches", level * 10);
                     command.Parameters.AddWithValue("@TotalWins", level * 6);
                     command.Parameters.AddWithValue("@TotalLosses", level * 4);
@@ -485,6 +504,30 @@ namespace ServerFpsProjectZero.Networking
             return null;
         }
 
+        /// <summary>
+        /// Adds a column to an existing table, ignoring the error when it is already there.
+        ///
+        /// SQLite has no "ADD COLUMN IF NOT EXISTS", and CREATE TABLE IF NOT EXISTS does nothing
+        /// for a table that already exists - so a database created before a column was
+        /// introduced would never gain it.
+        /// </summary>
+        private static void AddColumnIfMissing(SqliteConnection connection, string table, string column, string definition)
+        {
+            try
+            {
+                using (var alter = connection.CreateCommand())
+                {
+                    alter.CommandText = $"ALTER TABLE {table} ADD COLUMN {column} {definition}";
+                    alter.ExecuteNonQuery();
+                    Console.WriteLine($"[Database] Added column {table}.{column}");
+                }
+            }
+            catch (SqliteException ex) when (ex.Message.Contains("duplicate column name"))
+            {
+                // Already present - the normal case for an up-to-date database.
+            }
+        }
+
         private PlayerProfile MapReaderToPlayerProfile(SqliteDataReader reader)
         {
             return new PlayerProfile
@@ -497,6 +540,10 @@ namespace ServerFpsProjectZero.Networking
                 ExperienceToNextLevel = reader.GetInt32(reader.GetOrdinal("ExperienceToNextLevel")),
                 Gold = reader.GetInt32(reader.GetOrdinal("Gold")),
                 Money = (int)reader.GetDouble(reader.GetOrdinal("Money")),
+                CommonShards = reader.GetInt32(reader.GetOrdinal("CommonShards")),
+                RareShards = reader.GetInt32(reader.GetOrdinal("RareShards")),
+                EpicShards = reader.GetInt32(reader.GetOrdinal("EpicShards")),
+                LegendaryShards = reader.GetInt32(reader.GetOrdinal("LegendaryShards")),
                 MMR = reader.GetInt32(reader.GetOrdinal("MMR")),
                 Rank = reader.GetInt32(reader.GetOrdinal("Rank")),
                 TotalStats = new PlayerStats
@@ -571,6 +618,10 @@ namespace ServerFpsProjectZero.Networking
                         ExperienceToNextLevel = @ExperienceToNextLevel,
                         Gold = @Gold,
                         Money = @Money,
+                        CommonShards = @CommonShards,
+                        RareShards = @RareShards,
+                        EpicShards = @EpicShards,
+                        LegendaryShards = @LegendaryShards,
                         MMR = @MMR,
                         Rank = @Rank,
                         TotalMatches = @TotalMatches,
@@ -592,6 +643,10 @@ namespace ServerFpsProjectZero.Networking
                 command.Parameters.AddWithValue("@ExperienceToNextLevel", player.ExperienceToNextLevel);
                 command.Parameters.AddWithValue("@Gold", player.Gold);
                 command.Parameters.AddWithValue("@Money", player.Money);
+                command.Parameters.AddWithValue("@CommonShards", player.CommonShards);
+                command.Parameters.AddWithValue("@RareShards", player.RareShards);
+                command.Parameters.AddWithValue("@EpicShards", player.EpicShards);
+                command.Parameters.AddWithValue("@LegendaryShards", player.LegendaryShards);
                 command.Parameters.AddWithValue("@MMR", player.MMR);
                 command.Parameters.AddWithValue("@Rank", player.Rank);
 
@@ -725,6 +780,13 @@ namespace ServerFpsProjectZero.Networking
                 ExperienceToNextLevel = profile.ExperienceToNextLevel,
                 Gold = profile.Gold,
                 Money = profile.Money,
+                // Must be carried over too: UpdatePlayerProfile writes player.CommonShards etc.
+                // straight back to the database, so anything not copied here would be reset to
+                // zero on the player's next save.
+                CommonShards = profile.CommonShards,
+                RareShards = profile.RareShards,
+                EpicShards = profile.EpicShards,
+                LegendaryShards = profile.LegendaryShards,
                 Inventory = profile.Inventory ?? new PlayerInventory(),
                 Loadout = profile.Loadout ?? new PlayerLoadout(),
                 Stats = profile.TotalStats ?? new PlayerStats(),
