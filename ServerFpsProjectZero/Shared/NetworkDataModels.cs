@@ -558,6 +558,15 @@ namespace ServerFpsProjectZero.Shared
         /// </summary>
         public int hitPlayerId = -1;
 
+        /// <summary>
+        /// The co-op enemy the shot struck, or -1.
+        ///
+        /// Separate from hitPlayerId rather than reusing one field, because players and enemies
+        /// are different id spaces resolved by different managers, and a co-op shot can only
+        /// ever name one of them.
+        /// </summary>
+        public int hitEnemyId = -1;
+
         public DateTime timestamp;
     }
 
@@ -916,10 +925,165 @@ namespace ServerFpsProjectZero.Shared
     public enum GameType
     {
         TeamDeathmatch,
+
+        /// <summary>
+        /// Players versus waves of AI melee enemies. Runs its own queue and lobby list,
+        /// separate from TeamDeathmatch.
+        /// </summary>
+        CoopSurvival,
     }
     public enum Map
     {
         Office
+    }
+
+    /// <summary>
+    /// Shard tiers, cheapest first.
+    ///
+    /// The numeric ordering is load-bearing: which tiers an enemy can drop, and how likely the
+    /// higher ones are, is derived from the enemy's level. Do not reorder.
+    /// </summary>
+    public enum ShardTier
+    {
+        Common = 0,
+        Rare = 1,
+        Epic = 2,
+        Legendary = 3,
+    }
+
+    #endregion
+
+    #region Co-op Enemies
+
+    /// <summary>
+    /// One live enemy, as replicated to clients.
+    ///
+    /// Enemies are melee-only. Level is the whole difficulty curve: it scales health, damage,
+    /// speed and the shard drop table together, so there is one enemy archetype rather than a
+    /// type per behaviour.
+    /// </summary>
+    [Serializable]
+    public class CoopEnemyState
+    {
+        public int enemyId;
+        public int level;
+
+        public float x;
+        public float y;
+        public float z;
+
+        /// <summary>Facing in degrees, for the client to orient the model.</summary>
+        public float yaw;
+
+        public int health;
+        public int maxHealth;
+
+        /// <summary>Enemy id currently being attacked by this one, or -1.</summary>
+        public int targetPlayerId = -1;
+
+        /// <summary>Briefly set when the enemy swings, so the client can play the attack animation.</summary>
+        public bool isAttacking;
+    }
+
+    /// <summary>Sent when an enemy enters the world.</summary>
+    [Serializable]
+    public class CoopEnemySpawn
+    {
+        public string type = "coop_enemy_spawn";
+        public List<CoopEnemyState> enemies;
+        public int waveNumber;
+        public int waveTotal;
+    }
+
+    /// <summary>
+    /// Periodic reconciliation of live enemies. Full snapshots rather than deltas: enemy counts
+    /// are small, and a snapshot cannot drift.
+    /// </summary>
+    [Serializable]
+    public class CoopEnemyStateUpdate
+    {
+        public string type = "coop_enemy_state";
+        public List<CoopEnemyState> enemies;
+        public long serverTick;
+    }
+
+    /// <summary>
+    /// An enemy died. Carries the killer so the client can show its own hit confirmation, and
+    /// the shard grant so the HUD can report what it earned.
+    /// </summary>
+    [Serializable]
+    public class CoopEnemyDeath
+    {
+        public string type = "coop_enemy_death";
+        public int enemyId;
+        public int enemyLevel;
+
+        public int killerPlayerId = -1;
+        public string killerName;
+
+        /// <summary>False when the enemy despawned without being killed, e.g. at wave end.</summary>
+        public bool killed;
+
+        // The shard drop. tier is only meaningful when shardsGranted > 0.
+        public bool droppedShards;
+        public int shardsGranted;
+        public ShardTier tier;
+        public int killerShardBalance;
+
+        // Where it died, for a death effect.
+        public float x;
+        public float y;
+        public float z;
+    }
+
+    /// <summary>Wave lifecycle, so the HUD can show progress and countdowns.</summary>
+    [Serializable]
+    public class CoopWaveState
+    {
+        public string type = "coop_wave_state";
+        public int waveNumber;
+        public int waveTotal;
+
+        /// <summary>Enemies still alive this wave.</summary>
+        public int enemiesRemaining;
+
+        /// <summary>Seconds until the next wave starts. Zero while a wave is in progress.</summary>
+        public float nextWaveIn;
+
+        /// <summary>True between waves.</summary>
+        public bool isIntermission;
+
+        /// <summary>How many players are still standing.</summary>
+        public int playersAlive;
+    }
+
+    /// <summary>The player's shard balance, pushed whenever it changes.</summary>
+    [Serializable]
+    public class ShardBalanceUpdate
+    {
+        public string type = "shard_balance";
+        public int commonShards;
+        public int rareShards;
+        public int epicShards;
+        public int legendaryShards;
+
+        /// <summary>What was just earned, for a floating "+2 rare shards" style message.</summary>
+        public bool granted;
+        public int grantedAmount;
+        public ShardTier grantedTier;
+    }
+
+    /// <summary>A co-op run ended, with the totals the player earned.</summary>
+    [Serializable]
+    public class CoopRunSummary
+    {
+        public string type = "coop_run_summary";
+        public int wavesSurvived;
+        public int enemiesKilled;
+        public int commonShards;
+        public int rareShards;
+        public int epicShards;
+        public int legendaryShards;
     }
 
     #endregion
