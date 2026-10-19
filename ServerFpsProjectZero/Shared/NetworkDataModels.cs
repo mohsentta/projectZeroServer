@@ -63,7 +63,7 @@ namespace ServerFpsProjectZero.Shared
 
             WeaponSkins = new Dictionary<int, int>();
             CharacterSkins = new List<int>();
-            PlayerSkinId = 1;
+            PlayerSkinId = 2001;
         }
     }
 
@@ -163,11 +163,18 @@ namespace ServerFpsProjectZero.Shared
         public int DailyRewardGoldGranted { get; set; }
         public int DailyRewardXpGranted { get; set; }
 
+        /// <summary>
+        /// Season progress for this account. Sent with the profile so the battle pass panel
+        /// has everything it needs on login without a second round trip.
+        /// </summary>
+        public BattlePassState BattlePass { get; set; }
+
         public PlayerProfile()
         {
             TotalStats = new PlayerStats();
             Inventory = new PlayerInventory();
             Loadout = new PlayerLoadout();
+            BattlePass = new BattlePassState();
         }
     }
 
@@ -190,6 +197,165 @@ namespace ServerFpsProjectZero.Shared
             Loadout = new PlayerLoadout();
             Stats = new PlayerStats();
         }
+    }
+
+    #endregion
+
+    #region Battle Pass
+
+    /// <summary>What a battle pass tier hands out.</summary>
+    public enum RewardKind
+    {
+        Item,
+        Gold,
+        Shards,
+        Crate,
+    }
+
+    /// <summary>
+    /// One reward on the season track. The full table is built in BattlePassCatalog and is
+    /// identical on the client and the server; only the player's progress travels over the wire.
+    /// </summary>
+    [Serializable]
+    public class BattlePassReward
+    {
+        public int Tier { get; set; }
+
+        /// <summary>True for the premium track, false for the free track.</summary>
+        public bool Premium { get; set; }
+
+        public RewardKind Kind { get; set; }
+
+        /// <summary>Item id for <see cref="RewardKind.Item"/>; 0 otherwise.</summary>
+        public int ItemId { get; set; }
+
+        /// <summary>Gold/shard/crate amount. Ignored for items.</summary>
+        public int Amount { get; set; }
+
+        /// <summary>Rarity tier used by shard and crate rewards.</summary>
+        public ShardTier ShardTier { get; set; }
+
+        /// <summary>Display text, e.g. "250 Gold" or "Vector-9".</summary>
+        public string Label { get; set; }
+
+        /// <summary>Display rarity, e.g. "Rare".</summary>
+        public string Rarity { get; set; }
+    }
+
+    /// <summary>
+    /// A player's battle pass progress. Claimed tiers are lists rather than a high-water mark
+    /// so a player can claim out of order within what they have already unlocked.
+    /// </summary>
+    [Serializable]
+    public class BattlePassState
+    {
+        public int SeasonId { get; set; }
+
+        public string SeasonName { get; set; }
+
+        public int Xp { get; set; }
+
+        /// <summary>Current tier, 1..<see cref="MaxTier"/>. Tier 1 is available at 0 XP.</summary>
+        public int Tier { get; set; }
+
+        public int MaxTier { get; set; }
+
+        public bool PremiumUnlocked { get; set; }
+
+        public List<int> ClaimedFreeTiers { get; set; }
+
+        public List<int> ClaimedPremiumTiers { get; set; }
+
+        /// <summary>XP earned inside the current tier.</summary>
+        public int XpIntoCurrentTier { get; set; }
+
+        /// <summary>XP needed to finish the current tier; 0 at max tier.</summary>
+        public int XpForNextTier { get; set; }
+
+        /// <summary>How many unlocked rewards have not been claimed yet.</summary>
+        public int UnclaimedCount { get; set; }
+
+        public BattlePassState()
+        {
+            SeasonId = 1;
+            Tier = 1;
+            MaxTier = 30;
+            ClaimedFreeTiers = new List<int>();
+            ClaimedPremiumTiers = new List<int>();
+        }
+    }
+
+    /// <summary>Ask the server for the current battle pass state.</summary>
+    [Serializable]
+    public class BattlePassGetRequest
+    {
+        public string type;      // "battlepass_get"
+        public string token;
+    }
+
+    /// <summary>Claim one tier's reward. <c>premium</c> selects the track.</summary>
+    [Serializable]
+    public class BattlePassClaimRequest
+    {
+        public string type;      // "battlepass_claim"
+        public string token;
+        public int tier;
+        public bool premium;
+    }
+
+    /// <summary>Buy the premium track for this season with Gold.</summary>
+    [Serializable]
+    public class BattlePassBuyRequest
+    {
+        public string type;      // "battlepass_buy_premium"
+        public string token;
+    }
+
+    [Serializable]
+    public class BattlePassStateResponse
+    {
+        public string type = "battlepass_state";
+        public BattlePassState state;
+        public int premiumPrice;
+        public int gold;
+    }
+
+    [Serializable]
+    public class BattlePassClaimResult
+    {
+        public string type = "battlepass_claim_result";
+        public bool success;
+        public string message;
+        public int tier;
+        public bool premium;
+        public BattlePassState state;
+        public BattlePassReward reward;
+        public PlayerInventory inventory;
+        public int gold;
+    }
+
+    [Serializable]
+    public class BattlePassPurchaseResult
+    {
+        public string type = "battlepass_purchase_result";
+        public bool success;
+        public string message;
+        public BattlePassState state;
+        public int gold;
+    }
+
+    /// <summary>
+    /// Pushed when the player earns season XP (match end, co-op run). The panel updates its
+    /// progress bar and shows a "+XP" notice without polling the server.
+    /// </summary>
+    [Serializable]
+    public class BattlePassXpUpdate
+    {
+        public string type = "battlepass_xp";
+        public BattlePassState state;
+        public int xpGained;
+        public int tiersGained;
+        public string source;
     }
 
     #endregion
@@ -848,8 +1014,45 @@ namespace ServerFpsProjectZero.Shared
     [Serializable]
     public class EquipResponse
     {
+        /// <summary>
+        /// Packet discriminator. Without this the reply was an untyped object, so the client's
+        /// dispatch switch never matched "equip_response" and every equip silently timed out.
+        /// </summary>
+        public string type = "equip_response";
+
         public bool Success { get; set; }
         public string Message { get; set; }
+
+        /// <summary>
+        /// The loadout after the change, so the client does not have to guess which slot moved
+        /// or wait for a full profile refresh.
+        /// </summary>
+        public PlayerLoadout Loadout { get; set; }
+
+        public PlayerInventory Inventory { get; set; }
+        public int Gold { get; set; }
+    }
+
+    /// <summary>
+    /// Equip an owned item. <c>slotType</c> is "primary", "secondary", "melee", "grenade",
+    /// "weapon" (derive the slot from the weapon), "weapon_skin" or "character". Empty means
+    /// "work it out from the item".
+    /// </summary>
+    [Serializable]
+    public class EquipRequest
+    {
+        public string type;      // "equip"
+        public string token;
+        public int itemId;
+        public string slotType;
+    }
+
+    /// <summary>Ask for the current inventory and loadout.</summary>
+    [Serializable]
+    public class GetInventoryRequest
+    {
+        public string type;      // "get_inventory"
+        public string token;
     }
 
     [Serializable]
@@ -911,7 +1114,14 @@ namespace ServerFpsProjectZero.Shared
         Sniper,
         Shotgun,
         Melee,
-        Grenade
+        Grenade,
+
+        // Added with the expanded catalogue. Appended (not inserted) so existing serialized
+        // numeric values keep their meaning.
+        LMG,
+        DMR,
+        Revolver,
+        BattleRifle,
     }
 
     public enum WeaponRarity

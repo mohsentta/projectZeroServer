@@ -68,6 +68,13 @@ namespace ServerFpsProjectZero.Networking
             serverManager.OnClientDisconnected += HandleClientDisconnected;
             serverManager.OnPlayerGameStatsUpdate += UpdatePlayerGameStats;
 
+            // Battle pass / inventory
+            serverManager.OnBattlePassGetPacket += HandleBattlePassGet;
+            serverManager.OnBattlePassClaimPacket += HandleBattlePassClaim;
+            serverManager.OnBattlePassBuyPremiumPacket += HandleBattlePassBuyPremium;
+            serverManager.OnEquipItemPacket += HandleEquipItem;
+            serverManager.OnGetInventoryPacket += HandleGetInventory;
+
             // Initialize database and create test accounts
             InitializeDatabase();
             InitializeTestPlayers();
@@ -283,6 +290,21 @@ namespace ServerFpsProjectZero.Networking
                     )";
                 command.ExecuteNonQuery();
 
+                // Battle pass progress, one row per player. Claimed tiers are JSON lists so a
+                // player can claim unlocked tiers out of order; see BattlePassState.
+                command.CommandText = @"
+                    CREATE TABLE IF NOT EXISTS PlayerBattlePass (
+                        PlayerId INTEGER PRIMARY KEY,
+                        SeasonId INTEGER NOT NULL DEFAULT 1,
+                        Xp INTEGER NOT NULL DEFAULT 0,
+                        Premium INTEGER NOT NULL DEFAULT 0,
+                        ClaimedFree TEXT DEFAULT '[]',
+                        ClaimedPremium TEXT DEFAULT '[]',
+                        UpdatedAt TEXT,
+                        FOREIGN KEY (PlayerId) REFERENCES Players(PlayerId)
+                    )";
+                command.ExecuteNonQuery();
+
                 // Columns added after PlayerLoadout may already exist in a live database.
                 AddColumnIfMissing(connection, "PlayerLoadout", "PrimarySkinId", "INTEGER DEFAULT 0");
                 AddColumnIfMissing(connection, "PlayerLoadout", "SecondarySkinId", "INTEGER DEFAULT 0");
@@ -446,7 +468,8 @@ namespace ServerFpsProjectZero.Networking
                                 @CommonCrates, @RareCrates, @EpicCrates, @LegendaryCrates)";
                     command.Parameters.Clear();
                     command.Parameters.AddWithValue("@PlayerId", playerId);
-                    command.Parameters.AddWithValue("@UnlockedItems", "[1,2,3,4,2001]");
+                    command.Parameters.AddWithValue("@UnlockedItems",
+                        JsonConvert.SerializeObject(ItemCatalog.CreateStarterItems()));
                     command.Parameters.AddWithValue("@LootBoxes", "[]");
                     // New accounts start with no crates - they are earned.
                     command.Parameters.AddWithValue("@CommonCrates", 0);
@@ -509,12 +532,33 @@ namespace ServerFpsProjectZero.Networking
                     command.CommandText = "SELECT last_insert_rowid()";
                     int newPlayerId = Convert.ToInt32(command.ExecuteScalar());
 
-                    // Create inventory and loadout entries
-                    command.CommandText = "INSERT INTO PlayerInventory (PlayerId) VALUES (@PlayerId)";
+                    // Create inventory and loadout entries. New accounts need the starter kit,
+                    // exactly like the Player model and the test accounts, or they spawn with
+                    // nothing but the loadout ids pointing at items they do not own.
+                    command.CommandText = @"
+                        INSERT INTO PlayerInventory (PlayerId, UnlockedItems, LootBoxes,
+                                                     CommonCrates, RareCrates, EpicCrates, LegendaryCrates)
+                        VALUES (@PlayerId, @UnlockedItems, '[]', 0, 0, 0, 0)";
                     command.Parameters.AddWithValue("@PlayerId", newPlayerId);
+                    command.Parameters.AddWithValue("@UnlockedItems",
+                        JsonConvert.SerializeObject(ItemCatalog.CreateStarterItems()));
                     command.ExecuteNonQuery();
 
-                    command.CommandText = "INSERT INTO PlayerLoadout (PlayerId) VALUES (@PlayerId)";
+                    command.CommandText = @"
+                        INSERT INTO PlayerLoadout (PlayerId, PlayerSkinId)
+                        VALUES (@PlayerId, @PlayerSkinId)";
+                    command.Parameters.Clear();
+                    command.Parameters.AddWithValue("@PlayerId", newPlayerId);
+                    command.Parameters.AddWithValue("@PlayerSkinId", ItemCatalog.DefaultCharacterSkinId);
+                    command.ExecuteNonQuery();
+
+                    // The player owns the character skin they are wearing.
+                    command.CommandText = @"
+                        INSERT OR REPLACE INTO PlayerCharacterSkins (PlayerId, SkinId, SortOrder)
+                        VALUES (@PlayerId, @SkinId, 0)";
+                    command.Parameters.Clear();
+                    command.Parameters.AddWithValue("@PlayerId", newPlayerId);
+                    command.Parameters.AddWithValue("@SkinId", ItemCatalog.DefaultCharacterSkinId);
                     command.ExecuteNonQuery();
 
                     transaction.Commit();
@@ -564,6 +608,7 @@ namespace ServerFpsProjectZero.Networking
                     {
                         var profile = MapReaderToPlayerProfile(reader);
                         LoadLoadoutExtras(connection, profile);
+                        LoadBattlePass(connection, profile);
                         return profile;
                     }
                 }
@@ -594,6 +639,7 @@ namespace ServerFpsProjectZero.Networking
                     {
                         var profile = MapReaderToPlayerProfile(reader);
                         LoadLoadoutExtras(connection, profile);
+                        LoadBattlePass(connection, profile);
                         return profile;
                     }
                 }
@@ -770,6 +816,506 @@ namespace ServerFpsProjectZero.Networking
         }
 
         /// <summary>
+        /// Loads the battle pass row for a profile. A missing row is normal for an account
+        /// created before the season existed (or for a brand new account), so it starts at
+        /// tier 1 rather than failing the login.
+        /// </summary>
+        private void LoadBattlePass(SqliteConnection connection, PlayerProfile profile)
+        {
+            if (profile == null) return;
+
+            var state = new BattlePassState();
+
+            using (var cmd = connection.CreateCommand())
+            {
+                cmd.CommandText = @"SELECT SeasonId, Xp, Premium, ClaimedFree, ClaimedPremium
+                                    FROM PlayerBattlePass WHERE PlayerId = @PlayerId";
+                cmd.Parameters.AddWithValue("@PlayerId", profile.PlayerId);
+
+                using var reader = cmd.ExecuteReader();
+                if (reader.Read())
+                {
+                    state.SeasonId = reader.GetInt32(0);
+                    state.Xp = reader.GetInt32(1);
+                    state.PremiumUnlocked = reader.GetInt32(2) != 0;
+                    state.ClaimedFreeTiers = ParseTierList(reader.IsDBNull(3) ? null : reader.GetString(3));
+                    state.ClaimedPremiumTiers = ParseTierList(reader.IsDBNull(4) ? null : reader.GetString(4));
+                }
+            }
+
+            BattlePassCatalog.Normalize(state);
+            profile.BattlePass = state;
+        }
+
+        private static List<int> ParseTierList(string json)
+        {
+            if (string.IsNullOrWhiteSpace(json)) return new List<int>();
+
+            try
+            {
+                return JsonConvert.DeserializeObject<List<int>>(json) ?? new List<int>();
+            }
+            catch (JsonException)
+            {
+                // A malformed list must not block login; the player simply has nothing claimed.
+                return new List<int>();
+            }
+        }
+
+        /// <summary>
+        /// Writes the battle pass row. Upsert rather than update-only so the first save for an
+        /// account that predates the season creates the row.
+        /// </summary>
+        private void UpdatePlayerBattlePass(Player player)
+        {
+            if (player == null) return;
+
+            var state = player.BattlePass ?? new BattlePassState();
+            BattlePassCatalog.Normalize(state);
+            player.BattlePass = state;
+
+            using (var connection = new SqliteConnection(connectionString))
+            {
+                connection.Open();
+                using var command = connection.CreateCommand();
+                command.CommandText = @"
+                    INSERT OR REPLACE INTO PlayerBattlePass
+                        (PlayerId, SeasonId, Xp, Premium, ClaimedFree, ClaimedPremium, UpdatedAt)
+                    VALUES
+                        (@PlayerId, @SeasonId, @Xp, @Premium, @ClaimedFree, @ClaimedPremium, @UpdatedAt)";
+                command.Parameters.AddWithValue("@PlayerId", player.PlayerId);
+                command.Parameters.AddWithValue("@SeasonId", state.SeasonId);
+                command.Parameters.AddWithValue("@Xp", state.Xp);
+                command.Parameters.AddWithValue("@Premium", state.PremiumUnlocked ? 1 : 0);
+                command.Parameters.AddWithValue("@ClaimedFree", JsonConvert.SerializeObject(state.ClaimedFreeTiers));
+                command.Parameters.AddWithValue("@ClaimedPremium", JsonConvert.SerializeObject(state.ClaimedPremiumTiers));
+                command.Parameters.AddWithValue("@UpdatedAt", DateTime.UtcNow.ToString("o"));
+                command.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>
+        /// Gives season XP for a completed match or co-op run, persists it, and pushes the new
+        /// state to the player so the panel can update without a profile re-fetch.
+        /// </summary>
+        private void AwardBattlePassXp(Player player, int xp, string source)
+        {
+            if (player == null || xp <= 0) return;
+
+            if (player.BattlePass == null)
+                player.BattlePass = new BattlePassState();
+
+            int tiersGained = BattlePassCatalog.AddXp(player.BattlePass, xp);
+            UpdatePlayerBattlePass(player);
+
+            var client = serverManager.GetClientById(player.PlayerId);
+            if (client != null && client.IsConnected)
+            {
+                serverManager.SendPacket(new BattlePassXpUpdate
+                {
+                    state = player.BattlePass,
+                    xpGained = xp,
+                    tiersGained = tiersGained,
+                    source = source
+                }, client);
+            }
+
+            Console.WriteLine($"[BattlePass] {player.Username} +{xp} season XP ({source}) " +
+                              $"- tier {player.BattlePass.Tier}, {player.BattlePass.Xp} total" +
+                              (tiersGained > 0 ? $", +{tiersGained} tier(s)" : ""));
+        }
+
+        private void HandleBattlePassGet(string jsonData, IPEndPoint clientEndpoint)
+        {
+            var request = JsonConvert.DeserializeObject<BattlePassGetRequest>(jsonData);
+
+            if (request == null || string.IsNullOrEmpty(request.token) ||
+                !tokenToPlayer.TryGetValue(request.token, out Player player))
+            {
+                serverManager.SendErrorResponse(clientEndpoint, "Invalid or expired token", 401);
+                return;
+            }
+
+            if (player.BattlePass == null)
+                player.BattlePass = new BattlePassState();
+
+            BattlePassCatalog.Normalize(player.BattlePass);
+            serverManager.SendPacket(new BattlePassStateResponse
+            {
+                state = player.BattlePass,
+                premiumPrice = BattlePassCatalog.PremiumPrice,
+                gold = player.Gold
+            }, clientEndpoint);
+        }
+
+        private void HandleBattlePassClaim(string jsonData, IPEndPoint clientEndpoint)
+        {
+            var request = JsonConvert.DeserializeObject<BattlePassClaimRequest>(jsonData);
+
+            if (request == null || string.IsNullOrEmpty(request.token) ||
+                !tokenToPlayer.TryGetValue(request.token, out Player player))
+            {
+                serverManager.SendErrorResponse(clientEndpoint, "Invalid or expired token", 401);
+                return;
+            }
+
+            if (player.BattlePass == null)
+                player.BattlePass = new BattlePassState();
+
+            BattlePassCatalog.Normalize(player.BattlePass);
+
+            BattlePassReward reward = BattlePassCatalog.GetReward(request.tier, request.premium);
+            string failure = null;
+
+            if (reward == null)
+            {
+                failure = "No reward exists at that tier.";
+            }
+            else if (request.tier > player.BattlePass.Tier)
+            {
+                failure = $"Tier {request.tier} is locked. Reach tier {request.tier} first.";
+            }
+            else if (request.premium && !player.BattlePass.PremiumUnlocked)
+            {
+                failure = "The premium track is not unlocked.";
+            }
+            else if (BattlePassCatalog.IsClaimed(player.BattlePass, request.tier, request.premium))
+            {
+                failure = "That reward has already been claimed.";
+            }
+
+            if (failure != null)
+            {
+                serverManager.SendPacket(new BattlePassClaimResult
+                {
+                    success = false,
+                    message = failure,
+                    tier = request.tier,
+                    premium = request.premium,
+                    state = player.BattlePass,
+                    inventory = player.Inventory,
+                    gold = player.Gold
+                }, clientEndpoint);
+                return;
+            }
+
+            string grantMessage = GrantBattlePassReward(player, reward);
+
+            List<int> claimed = request.premium
+                ? player.BattlePass.ClaimedPremiumTiers
+                : player.BattlePass.ClaimedFreeTiers;
+            if (!claimed.Contains(request.tier))
+                claimed.Add(request.tier);
+
+            BattlePassCatalog.Normalize(player.BattlePass);
+
+            UpdatePlayerProfile(player);   // also writes the battle pass row
+            UpdatePlayerInventory(player);
+            UpdatePlayerLoadout(player);
+
+            serverManager.SendPacket(new BattlePassClaimResult
+            {
+                success = true,
+                message = grantMessage,
+                tier = request.tier,
+                premium = request.premium,
+                state = player.BattlePass,
+                reward = reward,
+                inventory = player.Inventory,
+                gold = player.Gold
+            }, clientEndpoint);
+
+            Console.WriteLine($"[BattlePass] {player.Username} claimed tier {request.tier} " +
+                              $"{(request.premium ? "premium" : "free")}: {reward.Label} ({grantMessage})");
+        }
+
+        /// <summary>
+        /// Applies one reward to the account. Duplicate item grants convert to Gold so a player
+        /// can never be left with an unclaimable tier whose item they already own.
+        /// </summary>
+        private string GrantBattlePassReward(Player player, BattlePassReward reward)
+        {
+            switch (reward.Kind)
+            {
+                case RewardKind.Gold:
+                    player.AddGold(reward.Amount);
+                    return $"+{reward.Amount} Gold";
+
+                case RewardKind.Shards:
+                    switch (reward.ShardTier)
+                    {
+                        case ShardTier.Common: player.CommonShards += reward.Amount; break;
+                        case ShardTier.Rare: player.RareShards += reward.Amount; break;
+                        case ShardTier.Epic: player.EpicShards += reward.Amount; break;
+                        case ShardTier.Legendary: player.LegendaryShards += reward.Amount; break;
+                    }
+                    return $"+{reward.Amount} {reward.ShardTier} Shards";
+
+                case RewardKind.Crate:
+                    switch (reward.ShardTier)
+                    {
+                        case ShardTier.Common: player.Inventory.CommonCrates++; break;
+                        case ShardTier.Rare: player.Inventory.RareCrates++; break;
+                        case ShardTier.Epic: player.Inventory.EpicCrates++; break;
+                        case ShardTier.Legendary: player.Inventory.LegendaryCrates++; break;
+                    }
+                    return $"+1 {reward.ShardTier} Crate";
+
+                case RewardKind.Item:
+                    return GrantItem(player, reward.ItemId);
+
+                default:
+                    return "Reward granted";
+            }
+        }
+
+        private string GrantItem(Player player, int itemId)
+        {
+            CatalogWeapon weapon = ItemCatalog.GetWeapon(itemId);
+            CatalogSkin skin = ItemCatalog.GetSkin(itemId);
+
+            if (weapon == null && skin == null)
+                return "Unknown item (no grant)";
+
+            if (player.HasItem(itemId))
+            {
+                // Duplicate: convert to Gold rather than silently wasting the tier.
+                player.AddGold(100);
+                return $"Already owned - converted to +100 Gold";
+            }
+
+            player.UnlockItem(itemId);
+
+            if (skin != null)
+            {
+                if (skin.IsCharacter)
+                {
+                    if (player.Loadout.CharacterSkins == null)
+                        player.Loadout.CharacterSkins = new List<int>();
+                    if (!player.Loadout.CharacterSkins.Contains(skin.Id))
+                        player.Loadout.CharacterSkins.Add(skin.Id);
+                }
+                else
+                {
+                    // A skin is useless without its gun, so unlock the base weapon too.
+                    if (!player.HasItem(skin.WeaponId))
+                        player.UnlockItem(skin.WeaponId);
+                }
+            }
+
+            return $"+{ItemCatalog.GetName(itemId)}";
+        }
+
+        private void HandleBattlePassBuyPremium(string jsonData, IPEndPoint clientEndpoint)
+        {
+            var request = JsonConvert.DeserializeObject<BattlePassBuyRequest>(jsonData);
+
+            if (request == null || string.IsNullOrEmpty(request.token) ||
+                !tokenToPlayer.TryGetValue(request.token, out Player player))
+            {
+                serverManager.SendErrorResponse(clientEndpoint, "Invalid or expired token", 401);
+                return;
+            }
+
+            if (player.BattlePass == null)
+                player.BattlePass = new BattlePassState();
+
+            BattlePassCatalog.Normalize(player.BattlePass);
+
+            string failure = null;
+            if (player.BattlePass.PremiumUnlocked)
+                failure = "The premium track is already unlocked.";
+            else if (player.Gold < BattlePassCatalog.PremiumPrice)
+                failure = $"Not enough Gold. Premium costs {BattlePassCatalog.PremiumPrice} Gold.";
+
+            if (failure != null)
+            {
+                serverManager.SendPacket(new BattlePassPurchaseResult
+                {
+                    success = false,
+                    message = failure,
+                    state = player.BattlePass,
+                    gold = player.Gold
+                }, clientEndpoint);
+                return;
+            }
+
+            player.DeductGold(BattlePassCatalog.PremiumPrice);
+            player.BattlePass.PremiumUnlocked = true;
+            BattlePassCatalog.Normalize(player.BattlePass);
+
+            UpdatePlayerProfile(player);
+            UpdatePlayerInventory(player);
+            UpdatePlayerLoadout(player);
+
+            serverManager.SendPacket(new BattlePassPurchaseResult
+            {
+                success = true,
+                message = "Premium track unlocked!",
+                state = player.BattlePass,
+                gold = player.Gold
+            }, clientEndpoint);
+
+            Console.WriteLine($"[BattlePass] {player.Username} unlocked the premium track " +
+                              $"for {BattlePassCatalog.PremiumPrice} Gold");
+        }
+
+        private void HandleGetInventory(string jsonData, IPEndPoint clientEndpoint)
+        {
+            var request = JsonConvert.DeserializeObject<GetInventoryRequest>(jsonData);
+
+            if (request == null || string.IsNullOrEmpty(request.token) ||
+                !tokenToPlayer.TryGetValue(request.token, out Player player))
+            {
+                serverManager.SendErrorResponse(clientEndpoint, "Invalid or expired token", 401);
+                return;
+            }
+
+            serverManager.SendPacket(new
+            {
+                type = "inventory_data",
+                playerId = player.PlayerId,
+                gold = player.Gold,
+                inventory = player.Inventory,
+                loadout = player.Loadout
+            }, clientEndpoint);
+        }
+
+        private void HandleEquipItem(string jsonData, IPEndPoint clientEndpoint)
+        {
+            var request = JsonConvert.DeserializeObject<EquipRequest>(jsonData);
+
+            if (request == null || string.IsNullOrEmpty(request.token) ||
+                !tokenToPlayer.TryGetValue(request.token, out Player player))
+            {
+                serverManager.SendErrorResponse(clientEndpoint, "Invalid or expired token", 401);
+                return;
+            }
+
+            EquipResponse response = TryEquip(player, request);
+            serverManager.SendPacket(response, clientEndpoint);
+
+            if (response.Success)
+            {
+                UpdatePlayerLoadout(player);
+                UpdatePlayerInventory(player);
+                Console.WriteLine($"[Equip] {player.Username}: {response.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Validates and applies one equip request. Server-authoritative: ownership and
+        /// slot compatibility are checked here, never trusted from the client.
+        /// </summary>
+        private EquipResponse TryEquip(Player player, EquipRequest request)
+        {
+            string slot = (request.slotType ?? "").Trim().ToLowerInvariant();
+
+            if (!player.HasItem(request.itemId))
+            {
+                return new EquipResponse
+                {
+                    Success = false,
+                    Message = "You do not own that item.",
+                    Loadout = player.Loadout,
+                    Inventory = player.Inventory,
+                    Gold = player.Gold
+                };
+            }
+
+            CatalogWeapon weapon = ItemCatalog.GetWeapon(request.itemId);
+            CatalogSkin skin = ItemCatalog.GetSkin(request.itemId);
+
+            string message;
+
+            if (weapon != null)
+            {
+                string targetSlot = string.IsNullOrEmpty(slot) || slot == "weapon" ? weapon.Slot : slot;
+
+                if (targetSlot != weapon.Slot)
+                {
+                    return new EquipResponse
+                    {
+                        Success = false,
+                        Message = $"{weapon.Name} cannot go in the {targetSlot} slot.",
+                        Loadout = player.Loadout,
+                        Inventory = player.Inventory,
+                        Gold = player.Gold
+                    };
+                }
+
+                switch (targetSlot)
+                {
+                    case "primary": player.Loadout.PrimaryWeaponId = weapon.Id; break;
+                    case "secondary": player.Loadout.SecondaryWeaponId = weapon.Id; break;
+                    case "melee": player.Loadout.MeleeWeaponId = weapon.Id; break;
+                    case "grenade": player.Loadout.GrenadeId = weapon.Id; break;
+                    default:
+                        return new EquipResponse
+                        {
+                            Success = false,
+                            Message = "Unknown weapon slot.",
+                            Loadout = player.Loadout,
+                            Inventory = player.Inventory,
+                            Gold = player.Gold
+                        };
+                }
+
+                message = $"Equipped {weapon.Name}.";
+            }
+            else if (skin != null && skin.IsCharacter)
+            {
+                if (player.Loadout.CharacterSkins == null)
+                    player.Loadout.CharacterSkins = new List<int>();
+                if (!player.Loadout.CharacterSkins.Contains(skin.Id))
+                    player.Loadout.CharacterSkins.Add(skin.Id);
+
+                player.Loadout.PlayerSkinId = skin.Id;
+                message = $"Wearing {skin.Name}.";
+            }
+            else if (skin != null)
+            {
+                if (!player.HasItem(skin.WeaponId))
+                {
+                    return new EquipResponse
+                    {
+                        Success = false,
+                        Message = $"You need the {ItemCatalog.GetName(skin.WeaponId)} to use this skin.",
+                        Loadout = player.Loadout,
+                        Inventory = player.Inventory,
+                        Gold = player.Gold
+                    };
+                }
+
+                if (player.Loadout.WeaponSkins == null)
+                    player.Loadout.WeaponSkins = new Dictionary<int, int>();
+
+                player.Loadout.WeaponSkins[skin.WeaponId] = skin.Id;
+                message = $"Applied {skin.Name} to {ItemCatalog.GetName(skin.WeaponId)}.";
+            }
+            else
+            {
+                return new EquipResponse
+                {
+                    Success = false,
+                    Message = "Unknown item.",
+                    Loadout = player.Loadout,
+                    Inventory = player.Inventory,
+                    Gold = player.Gold
+                };
+            }
+
+            return new EquipResponse
+            {
+                Success = true,
+                Message = message,
+                Loadout = player.Loadout,
+                Inventory = player.Inventory,
+                Gold = player.Gold
+            };
+        }
+
+        /// <summary>
         /// Loads the per-gun skin assignments and the owned character skins for a profile.
         ///
         /// These live in their own tables rather than as columns on PlayerLoadout, so they are
@@ -920,7 +1466,9 @@ namespace ServerFpsProjectZero.Networking
                 TotalPlayTime = TimeSpan.FromTicks(reader.GetInt64(reader.GetOrdinal("TotalPlayTimeTicks"))),
                 CreatedAt = DateTime.Parse(reader.GetString(reader.GetOrdinal("CreatedAt"))),
                 LastLogin = DateTime.Parse(reader.GetString(reader.GetOrdinal("LastLogin"))),
-                LoginStreak = reader.GetInt32(reader.GetOrdinal("LoginStreak"))
+                LoginStreak = reader.GetInt32(reader.GetOrdinal("LoginStreak")),
+                // Loaded separately by LoadBattlePass: the progress lives in its own table.
+                BattlePass = new BattlePassState()
             };
 
             return profile;
@@ -1015,6 +1563,10 @@ namespace ServerFpsProjectZero.Networking
 
                 command.ExecuteNonQuery();
             }
+
+            // The battle pass lives in its own table but is saved with the profile so every
+            // existing save path (login, match end, logout) keeps it current.
+            UpdatePlayerBattlePass(player);
         }
 
         private void UpdatePlayerInventory(Player player)
@@ -1247,7 +1799,8 @@ namespace ServerFpsProjectZero.Networking
                 TotalPlayTime = profile.TotalPlayTime,
                 CreatedAt = profile.CreatedAt,
                 LastLogin = profile.LastLogin,
-                LoginStreak = profile.LoginStreak
+                LoginStreak = profile.LoginStreak,
+                BattlePass = profile.BattlePass ?? new BattlePassState()
             };
         }
 
@@ -1374,6 +1927,10 @@ namespace ServerFpsProjectZero.Networking
                 player.Deaths += deaths;
                 player.AddGold(goldReward);
                 player.AddExperience(xpReward);
+
+                // Season progress uses the same XP figure the match awarded. This runs before
+                // UpdatePlayerProfile, which persists the battle pass row.
+                AwardBattlePassXp(player, Math.Max(1, xpReward), "match");
 
                 if (player.Stats != null)
                 {
@@ -1825,6 +2382,21 @@ namespace ServerFpsProjectZero.Networking
         {
             tokenToPlayer.TryGetValue(token, out Player player);
             return player;
+        }
+
+        /// <summary>
+        /// Console/debug helper: grants season XP to a connected player by username.
+        /// Used to tune the track and to exercise claims without playing a full match.
+        /// </summary>
+        public bool GrantBattlePassXp(string username, int amount)
+        {
+            Player player = connectedPlayers.Values.FirstOrDefault(
+                p => string.Equals(p.Username, username, StringComparison.OrdinalIgnoreCase));
+
+            if (player == null) return false;
+
+            AwardBattlePassXp(player, amount, "debug");
+            return true;
         }
 
         public Player GetPlayerById(int playerId)

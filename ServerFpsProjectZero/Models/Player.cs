@@ -54,6 +54,12 @@ namespace ServerFpsProjectZero.Models
         public PlayerLoadout Loadout { get; set; }
         public PlayerInventory Inventory { get; set; }
 
+        /// <summary>
+        /// Season progress. Carried on the Player model so match-end XP awards, claims and
+        /// purchases all mutate the same object that the profile save writes back.
+        /// </summary>
+        public BattlePassState BattlePass { get; set; }
+
         // Player Stats
         public PlayerStats Stats { get; set; }
 
@@ -129,14 +135,19 @@ namespace ServerFpsProjectZero.Models
             //     1     - 999    weapons, including grenades and melee
             //     1000  - 1999   skins
             //     2000+          reserved
-            // 1..4 matches the client's own weapon registry (WeaponManager.LoadWeaponData):
-            // 1 Assault Rifle, 2 Pistol, 3 Combat Knife, 4 Frag Grenade. Grenades are a
-            // WeaponType here, so they live in the weapon range rather than their own.
+            // The starter list comes from ItemCatalog so the server and client cannot drift.
             Inventory = new PlayerInventory();
-            Inventory.UnlockedItems = new List<int> { 1, 2, 3, 4, 1001 };
+            Inventory.UnlockedItems = ItemCatalog.CreateStarterItems();
             Inventory.LootBoxes = new List<LootBox>();
 
             Loadout = new PlayerLoadout();
+            Loadout.PlayerSkinId = ItemCatalog.DefaultCharacterSkinId;
+            Loadout.CharacterSkins = new List<int> { ItemCatalog.DefaultCharacterSkinId };
+            Loadout.WeaponSkins = new Dictionary<int, int>();
+
+            BattlePass = new BattlePassState();
+            BattlePassCatalog.Normalize(BattlePass);
+
             Stats = new PlayerStats();
             ActiveCheatWarnings = new List<string>();
             CheatViolations = 0;
@@ -380,7 +391,8 @@ namespace ServerFpsProjectZero.Models
                 LoginStreak = this.LoginStreak,
                 ClaimedDailyRewardToday = this.DailyRewardClaimedToday,
                 DailyRewardGoldGranted = this.DailyRewardGoldGranted,
-                DailyRewardXpGranted = this.DailyRewardXpGranted
+                DailyRewardXpGranted = this.DailyRewardXpGranted,
+                BattlePass = this.BattlePass ?? new BattlePassState()
             };
         }
 

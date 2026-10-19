@@ -60,6 +60,13 @@ namespace ServerFpsProjectZero.Server
         public event Action<string, IPEndPoint> OnLeaveQueuePacket;
         public event Action<string, IPEndPoint> OnGetQueueStatusPacket;
         public event Action<int, int, int, bool, int, int> OnPlayerGameStatsUpdate;
+
+        // Battle pass / inventory events
+        public event Action<string, IPEndPoint> OnBattlePassGetPacket;
+        public event Action<string, IPEndPoint> OnBattlePassClaimPacket;
+        public event Action<string, IPEndPoint> OnBattlePassBuyPremiumPacket;
+        public event Action<string, IPEndPoint> OnEquipItemPacket;
+        public event Action<string, IPEndPoint> OnGetInventoryPacket;
         //friends events:
         public event Action<string, IPEndPoint> OnGetFriendsPacket;
         public event Action<string, IPEndPoint> OnSendFriendRequestPacket;
@@ -200,6 +207,21 @@ namespace ServerFpsProjectZero.Server
                         break;
                     case "get_queue_status":
                         OnGetQueueStatusPacket?.Invoke(jsonData, remoteEndpoint);
+                        break;
+                    case "battlepass_get":
+                        OnBattlePassGetPacket?.Invoke(jsonData, remoteEndpoint);
+                        break;
+                    case "battlepass_claim":
+                        OnBattlePassClaimPacket?.Invoke(jsonData, remoteEndpoint);
+                        break;
+                    case "battlepass_buy_premium":
+                        OnBattlePassBuyPremiumPacket?.Invoke(jsonData, remoteEndpoint);
+                        break;
+                    case "equip":
+                        OnEquipItemPacket?.Invoke(jsonData, remoteEndpoint);
+                        break;
+                    case "get_inventory":
+                        OnGetInventoryPacket?.Invoke(jsonData, remoteEndpoint);
                         break;
                     case "movement":
                         OnMovementPacket?.Invoke(jsonData, remoteEndpoint);

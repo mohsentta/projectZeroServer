@@ -14,7 +14,7 @@ namespace ServerFpsProjectZero
         /// the client was sending correctly while an older server ignored the packet, and
         /// nothing in the output revealed it.
         /// </summary>
-        public const string ServerVersion = "0.7.0";
+        public const string ServerVersion = "0.8.0";
 
         /// <summary>Assembly build time, so two builds of the same version are still distinguishable.</summary>
         static string BuildStamp()
@@ -167,6 +167,7 @@ namespace ServerFpsProjectZero
             Console.WriteLine("  'games' - Show active games");
             Console.WriteLine("  'friends' - Show friends statistics");
             Console.WriteLine("  'restart' - Wipe server data (drop all tables) and reinitialize");
+            Console.WriteLine("  'bpxp <username> <amount>' - Grant battle pass XP (debug/tuning)");
             Console.WriteLine("  'help' - Show this menu");
             Console.WriteLine("  'quit' - Shutdown server\n");
 
@@ -175,6 +176,24 @@ namespace ServerFpsProjectZero
             do
             {
                 command = Console.ReadLine()?.ToLower();
+
+                // Battle pass XP debug command: "bpxp player1 1500".
+                if (command != null && command.StartsWith("bpxp "))
+                {
+                    string[] parts = command.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (parts.Length >= 3 && int.TryParse(parts[2], out int amount))
+                    {
+                        bool granted = loginManager.GrantBattlePassXp(parts[1], amount);
+                        Console.WriteLine(granted
+                            ? $"[BattlePass] Granted {amount} XP to {parts[1]}."
+                            : $"[BattlePass] No connected player named '{parts[1]}'.");
+                    }
+                    else
+                    {
+                        Console.WriteLine("Usage: bpxp <username> <amount>");
+                    }
+                    continue;
+                }
 
                 switch (command)
                 {
@@ -231,6 +250,7 @@ namespace ServerFpsProjectZero
             Console.WriteLine("  'games' - Show active game sessions");
             Console.WriteLine("  'friends' - Show friends system statistics");
             Console.WriteLine("  'restart' - Wipe server data (drop all tables) and reinitialize");
+            Console.WriteLine("  'bpxp <username> <amount>' - Grant battle pass XP to a connected player");
             Console.WriteLine("  'help' - Show this help menu");
             Console.WriteLine("  'quit' - Shutdown the server\n");
         }

@@ -868,11 +868,14 @@ namespace ServerFpsProjectZero.Server
             float distanceToTarget = (float)Math.Sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
 
             const float MAX_RANGE = 200f;
-            if (distanceToTarget > MAX_RANGE)
+            CatalogWeapon weapon = ItemCatalog.GetWeapon(input.weaponId);
+            float allowedRange = weapon != null ? Math.Max(MAX_RANGE, weapon.Stats.Range) : MAX_RANGE;
+
+            if (distanceToTarget > allowedRange)
             {
                 if (ShootDebug)
                     Console.WriteLine($"[Shoot] ignored: target {target.Username} is " +
-                                      $"{distanceToTarget:0.#}m away (max {MAX_RANGE})");
+                                      $"{distanceToTarget:0.#}m away (max {allowedRange:0.#} for weapon {input.weaponId})");
 
                 return;
             }
@@ -1192,21 +1195,18 @@ namespace ServerFpsProjectZero.Server
 
         private int CalculateDamage(int weaponId, float distance, bool isHeadshot)
         {
-            int baseDamage = weaponId switch
-            {
-                1 => 25,
-                2 => 35,
-                3 => 20,
-                4 => 70,
-                5 => 15,
-                _ => 15
-            };
+            // Damage and falloff come from the shared catalogue, so adding a weapon cannot
+            // silently deal the old hardcoded 15 damage on the server while the client's
+            // stat panel advertises something else.
+            CatalogWeapon weapon = ItemCatalog.GetWeapon(weaponId);
+            int baseDamage = weapon != null ? weapon.Stats.Damage : 15;
 
-            float falloff = Math.Clamp(1f - (distance / 100f), 0.3f, 1f);
+            float effectiveRange = weapon != null ? Math.Max(1f, weapon.Stats.Range) : 100f;
+            float falloff = Math.Clamp(1f - (distance / (effectiveRange * 1.5f)), 0.3f, 1f);
             int finalDamage = (int)(baseDamage * falloff);
 
             if (isHeadshot)
-                finalDamage *= 2;
+                finalDamage = (int)(finalDamage * (weapon != null ? weapon.Stats.HeadshotMultiplier : 2f));
 
             return Math.Max(1, finalDamage);
         }
