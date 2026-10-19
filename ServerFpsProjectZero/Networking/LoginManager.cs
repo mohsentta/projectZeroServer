@@ -7,6 +7,7 @@ using ServerFpsProjectZero.Shared;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Net;
 using System.Security.Cryptography;
@@ -1464,14 +1465,27 @@ namespace ServerFpsProjectZero.Networking
                     CharacterSkins = new List<int>()
                 },
                 TotalPlayTime = TimeSpan.FromTicks(reader.GetInt64(reader.GetOrdinal("TotalPlayTimeTicks"))),
-                CreatedAt = DateTime.Parse(reader.GetString(reader.GetOrdinal("CreatedAt"))),
-                LastLogin = DateTime.Parse(reader.GetString(reader.GetOrdinal("LastLogin"))),
+                CreatedAt = ParseUtc(reader.GetString(reader.GetOrdinal("CreatedAt"))),
+                LastLogin = ParseUtc(reader.GetString(reader.GetOrdinal("LastLogin"))),
                 LoginStreak = reader.GetInt32(reader.GetOrdinal("LoginStreak")),
                 // Loaded separately by LoadBattlePass: the progress lives in its own table.
                 BattlePass = new BattlePassState()
             };
 
             return profile;
+        }
+
+        /// <summary>
+        /// Reads a timestamp written with "o" (UTC, trailing Z) without converting it to local
+        /// time. DateTime.Parse's default is local, which made a UTC LastLogin look like
+        /// "tomorrow" in positive-offset zones and re-granted the daily reward every day.
+        /// </summary>
+        private static DateTime ParseUtc(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return DateTime.UtcNow;
+
+            return DateTime.Parse(text, CultureInfo.InvariantCulture,
+                DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal);
         }
 
         private bool UsernameExists(string username)
@@ -2440,7 +2454,9 @@ namespace ServerFpsProjectZero.Networking
             if (player == null) return;
 
             DateTime now = DateTime.UtcNow;
-            DateTime last = player.LastLogin;
+            DateTime last = player.LastLogin.Kind == DateTimeKind.Utc
+                ? player.LastLogin
+                : player.LastLogin.ToUniversalTime();
 
             // Already logged in today: no new reward, just report the state so the
             // client can reflect that today's reward is unavailable.
