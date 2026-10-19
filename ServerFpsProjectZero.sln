@@ -5,6 +5,12 @@ VisualStudioVersion = 17.12.35527.113 d17.12
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ServerFpsProjectZero", "ServerFpsProjectZero\ServerFpsProjectZero.csproj", "{FEC582B8-9A27-4F17-B33C-4C697AE15BFB}"
 EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Modules", "Modules", "{7EC2ED94-F21A-492F-9CB6-074A2CDF28C8}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ProjectZero.Core", "Modules\ProjectZero.Core\ProjectZero.Core.csproj", "{B0212B7F-1726-47DC-8791-DDDE1CFAA7CC}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ProjectZero.Services", "Modules\ProjectZero.Services\ProjectZero.Services.csproj", "{2ABB630A-2BE0-4FF9-B5EA-89E5514E26A4}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -15,8 +21,20 @@ Global
 		{FEC582B8-9A27-4F17-B33C-4C697AE15BFB}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{FEC582B8-9A27-4F17-B33C-4C697AE15BFB}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{FEC582B8-9A27-4F17-B33C-4C697AE15BFB}.Release|Any CPU.Build.0 = Release|Any CPU
+		{B0212B7F-1726-47DC-8791-DDDE1CFAA7CC}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B0212B7F-1726-47DC-8791-DDDE1CFAA7CC}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B0212B7F-1726-47DC-8791-DDDE1CFAA7CC}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B0212B7F-1726-47DC-8791-DDDE1CFAA7CC}.Release|Any CPU.Build.0 = Release|Any CPU
+		{2ABB630A-2BE0-4FF9-B5EA-89E5514E26A4}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{2ABB630A-2BE0-4FF9-B5EA-89E5514E26A4}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{2ABB630A-2BE0-4FF9-B5EA-89E5514E26A4}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{2ABB630A-2BE0-4FF9-B5EA-89E5514E26A4}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{B0212B7F-1726-47DC-8791-DDDE1CFAA7CC} = {7EC2ED94-F21A-492F-9CB6-074A2CDF28C8}
+		{2ABB630A-2BE0-4FF9-B5EA-89E5514E26A4} = {7EC2ED94-F21A-492F-9CB6-074A2CDF28C8}
 	EndGlobalSection
 EndGlobal
