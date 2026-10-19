@@ -1,0 +1,6 @@
+[submodule "Modules/ProjectZero.Core"]
+	path = Modules/ProjectZero.Core
+	url = https://github.com/mohsentta/ProjectZeroCore.git
+[submodule "Modules/ProjectZero.Services"]
+	path = Modules/ProjectZero.Services
+	url = https://github.com/mohsentta/ProjectZeroSerives.git

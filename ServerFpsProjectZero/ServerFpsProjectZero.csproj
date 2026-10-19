@@ -13,8 +13,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\Assets\ProjectZero.Core\ProjectZero.Core.csproj" />
-    <ProjectReference Include="..\..\Modules\ProjectZero.Services\ProjectZero.Services.csproj" />
+    <ProjectReference Include="..\Modules\ProjectZero.Core\ProjectZero.Core.csproj" />
+    <ProjectReference Include="..\Modules\ProjectZero.Services\ProjectZero.Services.csproj" />
   </ItemGroup>
 
   <!-- TestDailyLogin.cs is aspirational scaffolding that references non-existent
