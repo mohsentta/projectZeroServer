@@ -1,7 +1,11 @@
+using ProjectZero.Core;
+using ProjectZero.Services.BattlePass;
+using ProjectZero.Services.Equipment;
+using ProjectZero.Services.Matchmaking;
+using ProjectZero.Services.Persistence;
+using ProjectZero.Services.Rewards;
 using Microsoft.Data.Sqlite;
 using Newtonsoft.Json;
-using ServerFpsProjectZero.Matchmaking;
-using ServerFpsProjectZero.Models;
 using ServerFpsProjectZero.Server;
 using ServerFpsProjectZero.Shared;
 using System;
@@ -26,8 +30,11 @@ namespace ServerFpsProjectZero.Networking
         private ConcurrentDictionary<int, Player> connectedPlayers;
         private ConcurrentDictionary<string, Player> tokenToPlayer;
 
-        // SQLite connection string
-        private readonly string connectionString;
+        // SQLite persistence and shared services
+        private readonly PlayerStore store;
+        private readonly BattlePassService battlePassService;
+        private readonly DailyRewardService dailyRewardService;
+        private readonly EquipService equipService;
 
         // Matchmaking
         private MatchmakingQueue matchmakingQueue;
@@ -45,7 +52,10 @@ namespace ServerFpsProjectZero.Networking
             connectedPlayers = new ConcurrentDictionary<int, Player>();
             tokenToPlayer = new ConcurrentDictionary<string, Player>();
 
-            connectionString = _connectionString;
+            store = new PlayerStore(_connectionString);
+            battlePassService = new BattlePassService(store);
+            dailyRewardService = new DailyRewardService(store);
+            equipService = new EquipService(store);
 
             // Initialize matchmaking
             matchmakingQueue = new MatchmakingQueue();
@@ -75,10 +85,6 @@ namespace ServerFpsProjectZero.Networking
             serverManager.OnBattlePassBuyPremiumPacket += HandleBattlePassBuyPremium;
             serverManager.OnEquipItemPacket += HandleEquipItem;
             serverManager.OnGetInventoryPacket += HandleGetInventory;
-
-            // Initialize database and create test accounts
-            InitializeDatabase();
-            InitializeTestPlayers();
         }
 
         public void SetFriendsManager(FriendsManager manager)
@@ -88,7 +94,7 @@ namespace ServerFpsProjectZero.Networking
 
         public void Start()
         {
-            var playerCount = GetPlayerCount();
+            var playerCount = store.GetPlayerCount();
             Console.WriteLine($"[LoginManager] Player database ready with {playerCount} players");
             Console.WriteLine($"[LoginManager] Matchmaking queue active (requires {MatchmakingQueue.PLAYERS_PER_GAME} players per game)");
         }
@@ -128,525 +134,33 @@ namespace ServerFpsProjectZero.Networking
             connectedPlayers.Clear();
             tokenToPlayer.Clear();
 
-            // Drop every user table (ignore SQLite internal sqlite_* tables).
-            using (var connection = new SqliteConnection(connectionString))
-            {
-                connection.Open();
-                var names = new List<string>();
-                var listCmd = connection.CreateCommand();
-                listCmd.CommandText = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'";
-                using (var reader = listCmd.ExecuteReader())
-                {
-                    while (reader.Read())
-                        names.Add(reader.GetString(0));
-                }
-
-                var dropCmd = connection.CreateCommand();
-                foreach (var table in names)
-                {
-                    dropCmd.CommandText = $"DROP TABLE IF EXISTS \"{table}\"";
-                    dropCmd.ExecuteNonQuery();
-                    Console.WriteLine($"[LoginManager] Dropped table '{table}'");
-                }
-            }
-
-            // Recreate the schema and seed test accounts.
-            InitializeDatabase();
-            InitializeTestPlayers();
+            store.Reset();
 
             Console.WriteLine("[LoginManager] Server data wiped and reinitialized.");
         }
 
         #region Database Initialization
 
-        private void InitializeDatabase()
-        {
-            using (var connection = new SqliteConnection(connectionString))
-            {
-                connection.Open();
-
-                var command = connection.CreateCommand();
-
-                // NOTE: Tables are deliberately NOT dropped on startup anymore, so
-                // player data persists across normal restarts. Wiping happens on
-                // demand via the 'restart' console command -> LoginManager.ResetDatabase().
-
-                // Create players table
-                command.CommandText = @"
-                    CREATE TABLE IF NOT EXISTS Players (
-                        PlayerId INTEGER PRIMARY KEY,
-                        Username TEXT UNIQUE NOT NULL,
-                        Email TEXT UNIQUE NOT NULL,
-                        PasswordHash TEXT NOT NULL,
-                        Salt TEXT NOT NULL,
-                        Level INTEGER DEFAULT 1,
-                        Experience INTEGER DEFAULT 0,
-                        ExperienceToNextLevel INTEGER DEFAULT 150,
-                        Gold INTEGER DEFAULT 500,
-                        Money REAL DEFAULT 0.0,
-                        CommonShards INTEGER DEFAULT 0,
-                        RareShards INTEGER DEFAULT 0,
-                        EpicShards INTEGER DEFAULT 0,
-                        LegendaryShards INTEGER DEFAULT 0,
-                        MMR INTEGER DEFAULT 1000,
-                        Rank INTEGER DEFAULT 1,
-                        TotalMatches INTEGER DEFAULT 0,
-                        TotalWins INTEGER DEFAULT 0,
-                        TotalLosses INTEGER DEFAULT 0,
-                        TotalKills INTEGER DEFAULT 0,
-                        TotalDeaths INTEGER DEFAULT 0,
-                        TotalHeadshots INTEGER DEFAULT 0,
-                        TotalAssists INTEGER DEFAULT 0,
-                        WinRate REAL DEFAULT 0.0,
-                        KDRatio REAL DEFAULT 0.0,
-                        TotalPlayTimeTicks BIGINT DEFAULT 0,
-                        CreatedAt TEXT NOT NULL,
-                        LastLogin TEXT NOT NULL,
-                        LoginStreak INTEGER DEFAULT 0
-                    )";
-                command.ExecuteNonQuery();
-
-                // Add columns introduced after a database may already exist. CREATE TABLE IF
-                // NOT EXISTS silently does nothing for an existing table, so without this an
-                // older FPSGame.db would never gain the new columns and every SELECT against
-                // them would throw "no such column".
-                AddColumnIfMissing(connection, "Players", "CommonShards", "INTEGER DEFAULT 0");
-                AddColumnIfMissing(connection, "Players", "RareShards", "INTEGER DEFAULT 0");
-                AddColumnIfMissing(connection, "Players", "EpicShards", "INTEGER DEFAULT 0");
-                AddColumnIfMissing(connection, "Players", "LegendaryShards", "INTEGER DEFAULT 0");
-
-                // Create inventory table
-                command.CommandText = @"
-                    CREATE TABLE IF NOT EXISTS PlayerInventory (
-                        PlayerId INTEGER PRIMARY KEY,
-                        UnlockedItems TEXT DEFAULT '[]',
-                        LootBoxes TEXT DEFAULT '[]',
-                        CommonCrates INTEGER DEFAULT 0,
-                        RareCrates INTEGER DEFAULT 0,
-                        EpicCrates INTEGER DEFAULT 0,
-                        LegendaryCrates INTEGER DEFAULT 0,
-                        FOREIGN KEY (PlayerId) REFERENCES Players(PlayerId)
-                    )";
-                command.ExecuteNonQuery();
-
-                // Unlocked items replaced the per-type columns (OwnedWeapons, OwnedSkins,
-                // OwnedGrenades) with one flat list, because item ids are globally unique.
-                bool unlockedColumnAdded = AddColumnIfMissing(connection, "PlayerInventory", "UnlockedItems", "TEXT DEFAULT '[]'");
-
-                // The old columns still hold each player's unlocks, so fold them into the new
-                // list rather than starting everyone from empty. The old columns are left in
-                // place as a safety net; nothing reads them once this has run.
-                if (unlockedColumnAdded)
-                {
-                    FoldLegacyOwnedItemsIntoUnlocked(connection);
-                }
-
-                // Unopened crate counts, added after PlayerInventory already existed.
-                AddColumnIfMissing(connection, "PlayerInventory", "CommonCrates", "INTEGER DEFAULT 0");
-                AddColumnIfMissing(connection, "PlayerInventory", "RareCrates", "INTEGER DEFAULT 0");
-                AddColumnIfMissing(connection, "PlayerInventory", "EpicCrates", "INTEGER DEFAULT 0");
-                AddColumnIfMissing(connection, "PlayerInventory", "LegendaryCrates", "INTEGER DEFAULT 0");
-
-                // Create loadout table. The slot columns carry a SkinId for weapon slots, so a
-                // slot remembers the skin applied to whatever weapon currently sits in it.
-                // The legacy column names are kept so an existing database keeps working.
-                command.CommandText = @"
-                    CREATE TABLE IF NOT EXISTS PlayerLoadout (
-                        PlayerId INTEGER PRIMARY KEY,
-                        PrimaryWeaponId INTEGER DEFAULT 1,
-                        SecondaryWeaponId INTEGER DEFAULT 2,
-                        MeleeWeaponId INTEGER DEFAULT 3,
-                        GrenadeId INTEGER DEFAULT 4,
-                        PlayerSkinId INTEGER DEFAULT 1,
-                        WeaponSkinId INTEGER DEFAULT 1,
-                        PrimarySkinId INTEGER DEFAULT 0,
-                        SecondarySkinId INTEGER DEFAULT 0,
-                        MeleeSkinId INTEGER DEFAULT 0,
-                        GrenadeSkinId INTEGER DEFAULT 0,
-                        UpdatedAt TEXT,
-                        FOREIGN KEY (PlayerId) REFERENCES Players(PlayerId)
-                    )";
-                command.ExecuteNonQuery();
-
-                // Per-gun skin assignments, keyed by weapon id rather than slot.
-                command.CommandText = @"
-                    CREATE TABLE IF NOT EXISTS PlayerWeaponSkins (
-                        PlayerId INTEGER NOT NULL,
-                        WeaponId INTEGER NOT NULL,
-                        SkinId INTEGER NOT NULL,
-                        UpdatedAt TEXT,
-                        PRIMARY KEY (PlayerId, WeaponId),
-                        FOREIGN KEY (PlayerId) REFERENCES Players(PlayerId)
-                    )";
-                command.ExecuteNonQuery();
-
-                // Character skins the player owns, in preference order.
-                command.CommandText = @"
-                    CREATE TABLE IF NOT EXISTS PlayerCharacterSkins (
-                        PlayerId INTEGER NOT NULL,
-                        SkinId INTEGER NOT NULL,
-                        SortOrder INTEGER NOT NULL DEFAULT 0,
-                        PRIMARY KEY (PlayerId, SkinId),
-                        FOREIGN KEY (PlayerId) REFERENCES Players(PlayerId)
-                    )";
-                command.ExecuteNonQuery();
-
-                // Battle pass progress, one row per player. Claimed tiers are JSON lists so a
-                // player can claim unlocked tiers out of order; see BattlePassState.
-                command.CommandText = @"
-                    CREATE TABLE IF NOT EXISTS PlayerBattlePass (
-                        PlayerId INTEGER PRIMARY KEY,
-                        SeasonId INTEGER NOT NULL DEFAULT 1,
-                        Xp INTEGER NOT NULL DEFAULT 0,
-                        Premium INTEGER NOT NULL DEFAULT 0,
-                        ClaimedFree TEXT DEFAULT '[]',
-                        ClaimedPremium TEXT DEFAULT '[]',
-                        UpdatedAt TEXT,
-                        FOREIGN KEY (PlayerId) REFERENCES Players(PlayerId)
-                    )";
-                command.ExecuteNonQuery();
-
-                // Columns added after PlayerLoadout may already exist in a live database.
-                AddColumnIfMissing(connection, "PlayerLoadout", "PrimarySkinId", "INTEGER DEFAULT 0");
-                AddColumnIfMissing(connection, "PlayerLoadout", "SecondarySkinId", "INTEGER DEFAULT 0");
-                AddColumnIfMissing(connection, "PlayerLoadout", "MeleeSkinId", "INTEGER DEFAULT 0");
-                AddColumnIfMissing(connection, "PlayerLoadout", "GrenadeSkinId", "INTEGER DEFAULT 0");
-                AddColumnIfMissing(connection, "PlayerLoadout", "UpdatedAt", "TEXT");
-
-                // The old single WeaponSkinId applied to whichever gun was primary. Fold it into
-                // the per-gun table so a player who had a skin set does not silently lose it.
-                FoldLegacyWeaponSkinIntoAssignments(connection);
-
-                // Character skins had no per-player list before, so a migrated player would
-                // otherwise have an empty list while still wearing PlayerSkinId - i.e. wearing a
-                // skin they do not appear to own. Give everyone the skin they are wearing.
-                BackfillCharacterSkinsFromWorn(connection);
-
-                // Create indices
-                command.CommandText = "CREATE INDEX IF NOT EXISTS idx_players_username ON Players(Username)";
-                command.ExecuteNonQuery();
-                command.CommandText = "CREATE INDEX IF NOT EXISTS idx_players_email ON Players(Email)";
-                command.ExecuteNonQuery();
-                command.CommandText = "CREATE INDEX IF NOT EXISTS idx_players_mmr ON Players(MMR)";
-                command.ExecuteNonQuery();
-
-                // Lightweight migration for databases created by an older schema:
-                // add any newer columns without dropping or wiping existing data.
-                EnsureColumn(connection, "Players", "LoginStreak", "INTEGER DEFAULT 0");
-
-                Console.WriteLine("[Database] SQLite database initialized successfully");
-            }
-        }
 
         /// <summary>
         /// Adds a column to an existing table when it is missing (lightweight
         /// migration for databases created by an older schema). Preserves data.
         /// </summary>
-        private void EnsureColumn(SqliteConnection connection, string table, string column, string definition)
-        {
-            var check = connection.CreateCommand();
-            check.CommandText = $"SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = '{column}'";
-            bool exists = Convert.ToInt64(check.ExecuteScalar()) > 0;
-            if (exists) return;
 
-            var alter = connection.CreateCommand();
-            alter.CommandText = $"ALTER TABLE \"{table}\" ADD COLUMN \"{column}\" {definition}";
-            alter.ExecuteNonQuery();
-            Console.WriteLine($"[Database] Migrated table '{table}': added column '{column}' {definition}");
-        }
-
-        private int GetPlayerCount()
-        {
-            using (var connection = new SqliteConnection(connectionString))
-            {
-                connection.Open();
-                var command = connection.CreateCommand();
-                command.CommandText = "SELECT COUNT(*) FROM Players";
-                return Convert.ToInt32(command.ExecuteScalar());
-            }
-        }
 
         #endregion
 
         #region Test Player Initialization
 
-        private void InitializeTestPlayers()
-        {
-            var playerCount = GetPlayerCount();
 
-            // Only create test players if database is empty
-            if (playerCount > 0) return;
 
-            CreateTestPlayer("player1", "player1@test.com", "password123", 1200, 500, 5);
-            CreateTestPlayer("player2", "player2@test.com", "password123", 1350, 750, 8);
-            CreateTestPlayer("player3", "player3@test.com", "password123", 1100, 300, 3);
-            CreateTestPlayer("proplayer", "pro@test.com", "pro123", 1850, 2500, 15);
-            CreateTestPlayer("newbie", "newbie@test.com", "test123", 1000, 100, 1);
-            CreateTestPlayer("veteran", "vet@test.com", "vet123", 1500, 1200, 10);
-            CreateTestPlayer("casual", "casual@test.com", "casual123", 1150, 400, 4);
-            CreateTestPlayer("tryhard", "tryhard@test.com", "try123", 1700, 1800, 12);
-            CreateTestPlayer("sniper", "sniper@test.com", "sniper123", 1400, 900, 7);
-            CreateTestPlayer("shotgun", "shotgun@test.com", "shotgun123", 1250, 600, 6);
 
-            Console.WriteLine("[Database] Player database initialized with 10 test players");
-        }
-
-        private void CreateTestPlayer(string username, string email, string password, int mmr, int gold, int level)
-        {
-            string salt = GenerateSalt();
-            string passwordHash = HashPassword(password, salt);
-
-            using (var connection = new SqliteConnection(connectionString))
-            {
-                connection.Open();
-                using (var transaction = connection.BeginTransaction())
-                {
-                    var command = connection.CreateCommand();
-                    command.Transaction = transaction;
-
-                    // Insert player
-                    command.CommandText = @"
-                        INSERT INTO Players (
-                            Username, Email, PasswordHash, Salt, Level, Experience, 
-                            ExperienceToNextLevel, Gold, MMR, Rank,
-                            CommonShards, RareShards, EpicShards, LegendaryShards,
-                            TotalMatches, TotalWins, TotalLosses, TotalKills, TotalDeaths,
-                            TotalHeadshots, TotalAssists, WinRate, KDRatio,
-                            TotalPlayTimeTicks, CreatedAt, LastLogin
-                        ) VALUES (
-                            @Username, @Email, @PasswordHash, @Salt, @Level, @Experience,
-                            @ExperienceToNextLevel, @Gold, @MMR, @Rank,
-                            @CommonShards, @RareShards, @EpicShards, @LegendaryShards,
-                            @TotalMatches, @TotalWins, @TotalLosses, @TotalKills, @TotalDeaths,
-                            @TotalHeadshots, @TotalAssists, @WinRate, @KDRatio,
-                            @TotalPlayTimeTicks, @CreatedAt, @LastLogin
-                        )";
-
-                    command.Parameters.AddWithValue("@Username", username);
-                    command.Parameters.AddWithValue("@Email", email);
-                    command.Parameters.AddWithValue("@PasswordHash", passwordHash);
-                    command.Parameters.AddWithValue("@Salt", salt);
-                    command.Parameters.AddWithValue("@Level", level);
-                    command.Parameters.AddWithValue("@Experience", level * 100);
-                    command.Parameters.AddWithValue("@ExperienceToNextLevel", CalculateExpToNextLevel(level));
-                    command.Parameters.AddWithValue("@Gold", gold);
-                    command.Parameters.AddWithValue("@MMR", mmr);
-                    command.Parameters.AddWithValue("@Rank", CalculateRankFromMMR(mmr));
-                    command.Parameters.AddWithValue("@CommonShards", 0);
-                    command.Parameters.AddWithValue("@RareShards", 0);
-                    command.Parameters.AddWithValue("@EpicShards", 0);
-                    command.Parameters.AddWithValue("@LegendaryShards", 0);
-                    command.Parameters.AddWithValue("@TotalMatches", level * 10);
-                    command.Parameters.AddWithValue("@TotalWins", level * 6);
-                    command.Parameters.AddWithValue("@TotalLosses", level * 4);
-                    command.Parameters.AddWithValue("@TotalKills", level * 50);
-                    command.Parameters.AddWithValue("@TotalDeaths", level * 30);
-                    command.Parameters.AddWithValue("@TotalHeadshots", level * 15);
-                    command.Parameters.AddWithValue("@TotalAssists", level * 20);
-                    command.Parameters.AddWithValue("@WinRate", 60.0);
-                    command.Parameters.AddWithValue("@KDRatio", 1.666);
-                    command.Parameters.AddWithValue("@TotalPlayTimeTicks", TimeSpan.FromHours(level * 5).Ticks);
-                    command.Parameters.AddWithValue("@CreatedAt", DateTime.UtcNow.AddDays(-level * 7).ToString("o"));
-                    command.Parameters.AddWithValue("@LastLogin", DateTime.UtcNow.AddDays(-1).ToString("o"));
-                    command.ExecuteNonQuery();
-
-                    // Get the auto-generated PlayerId
-                    command.CommandText = "SELECT last_insert_rowid()";
-                    var playerId = Convert.ToInt32(command.ExecuteScalar());
-
-                    // Insert inventory.
-                    //
-                    // ITEM ID CONVENTION - ids are globally unique across every item type:
-                    //     1     - 999    weapons, including grenades and melee
-                    //     1000  - 1999   gun skins
-                    //     2000  - 2999   character skins
-                    // 1..4 matches the client's weapon registry (WeaponManager.LoadWeaponData):
-                    // 1 Assault Rifle, 2 Pistol, 3 Combat Knife, 4 Frag Grenade.
-                    command.CommandText = @"
-                        INSERT INTO PlayerInventory (PlayerId, UnlockedItems, LootBoxes,
-                                                     CommonCrates, RareCrates, EpicCrates, LegendaryCrates)
-                        VALUES (@PlayerId, @UnlockedItems, @LootBoxes,
-                                @CommonCrates, @RareCrates, @EpicCrates, @LegendaryCrates)";
-                    command.Parameters.Clear();
-                    command.Parameters.AddWithValue("@PlayerId", playerId);
-                    command.Parameters.AddWithValue("@UnlockedItems",
-                        JsonConvert.SerializeObject(ItemCatalog.CreateStarterItems()));
-                    command.Parameters.AddWithValue("@LootBoxes", "[]");
-                    // New accounts start with no crates - they are earned.
-                    command.Parameters.AddWithValue("@CommonCrates", 0);
-                    command.Parameters.AddWithValue("@RareCrates", 0);
-                    command.Parameters.AddWithValue("@EpicCrates", 0);
-                    command.Parameters.AddWithValue("@LegendaryCrates", 0);
-                    command.ExecuteNonQuery();
-
-                    // Insert loadout
-                    command.CommandText = @"
-                        INSERT INTO PlayerLoadout (PlayerId, PrimaryWeaponId, SecondaryWeaponId,
-                                                   MeleeWeaponId, GrenadeId, PlayerSkinId, WeaponSkinId,
-                                                   PrimarySkinId, SecondarySkinId, MeleeSkinId, GrenadeSkinId,
-                                                   UpdatedAt)
-                        VALUES (@PlayerId, 1, 2, 3, 4, 2001, 0, 0, 0, 0, 0, @UpdatedAt)";
-                    command.Parameters.Clear();
-                    command.Parameters.AddWithValue("@PlayerId", playerId);
-                    command.Parameters.AddWithValue("@UpdatedAt", DateTime.UtcNow.ToString("o"));
-                    command.ExecuteNonQuery();
-
-                    // The player starts owning the one character skin they are wearing.
-                    command.CommandText = @"
-                        INSERT OR REPLACE INTO PlayerCharacterSkins (PlayerId, SkinId, SortOrder)
-                        VALUES (@PlayerId, 2001, 0)";
-                    command.Parameters.Clear();
-                    command.Parameters.AddWithValue("@PlayerId", playerId);
-                    command.ExecuteNonQuery();
-
-                    transaction.Commit();
-                }
-            }
-        }
-
-        private int CreateNewPlayer(string username, string email, string passwordHash, string salt)
-        {
-            using (var connection = new SqliteConnection(connectionString))
-            {
-                connection.Open();
-                using (var transaction = connection.BeginTransaction())
-                {
-                    var command = connection.CreateCommand();
-                    command.Transaction = transaction;
-
-                    command.CommandText = @"
-                        INSERT INTO Players (
-                            Username, Email, PasswordHash, Salt, CreatedAt, LastLogin
-                        ) VALUES (
-                            @Username, @Email, @PasswordHash, @Salt, @CreatedAt, @LastLogin
-                        )";
-
-                    command.Parameters.AddWithValue("@Username", username);
-                    command.Parameters.AddWithValue("@Email", email);
-                    command.Parameters.AddWithValue("@PasswordHash", passwordHash);
-                    command.Parameters.AddWithValue("@Salt", salt);
-                    command.Parameters.AddWithValue("@CreatedAt", DateTime.UtcNow.ToString("o"));
-                    command.Parameters.AddWithValue("@LastLogin", DateTime.UtcNow.ToString("o"));
-                    command.ExecuteNonQuery();
-
-                    // Get the new PlayerId
-                    command.CommandText = "SELECT last_insert_rowid()";
-                    int newPlayerId = Convert.ToInt32(command.ExecuteScalar());
-
-                    // Create inventory and loadout entries. New accounts need the starter kit,
-                    // exactly like the Player model and the test accounts, or they spawn with
-                    // nothing but the loadout ids pointing at items they do not own.
-                    command.CommandText = @"
-                        INSERT INTO PlayerInventory (PlayerId, UnlockedItems, LootBoxes,
-                                                     CommonCrates, RareCrates, EpicCrates, LegendaryCrates)
-                        VALUES (@PlayerId, @UnlockedItems, '[]', 0, 0, 0, 0)";
-                    command.Parameters.AddWithValue("@PlayerId", newPlayerId);
-                    command.Parameters.AddWithValue("@UnlockedItems",
-                        JsonConvert.SerializeObject(ItemCatalog.CreateStarterItems()));
-                    command.ExecuteNonQuery();
-
-                    command.CommandText = @"
-                        INSERT INTO PlayerLoadout (PlayerId, PlayerSkinId)
-                        VALUES (@PlayerId, @PlayerSkinId)";
-                    command.Parameters.Clear();
-                    command.Parameters.AddWithValue("@PlayerId", newPlayerId);
-                    command.Parameters.AddWithValue("@PlayerSkinId", ItemCatalog.DefaultCharacterSkinId);
-                    command.ExecuteNonQuery();
-
-                    // The player owns the character skin they are wearing.
-                    command.CommandText = @"
-                        INSERT OR REPLACE INTO PlayerCharacterSkins (PlayerId, SkinId, SortOrder)
-                        VALUES (@PlayerId, @SkinId, 0)";
-                    command.Parameters.Clear();
-                    command.Parameters.AddWithValue("@PlayerId", newPlayerId);
-                    command.Parameters.AddWithValue("@SkinId", ItemCatalog.DefaultCharacterSkinId);
-                    command.ExecuteNonQuery();
-
-                    transaction.Commit();
-                    return newPlayerId;
-                }
-            }
-        }
-
-        private int CalculateRankFromMMR(int mmr)
-        {
-            if (mmr < 1000) return 1;
-            if (mmr < 1150) return 2;
-            if (mmr < 1300) return 3;
-            if (mmr < 1450) return 4;
-            if (mmr < 1600) return 5;
-            if (mmr < 1750) return 6;
-            if (mmr < 1900) return 7;
-            if (mmr < 2050) return 8;
-            if (mmr < 2200) return 9;
-            return 10;
-        }
 
         #endregion
 
         #region Database Operations
 
-        private PlayerProfile GetPlayerProfileFromDb(string username)
-        {
-            using (var connection = new SqliteConnection(connectionString))
-            {
-                connection.Open();
-                var command = connection.CreateCommand();
-                command.CommandText = @"
-                    SELECT p.*, i.UnlockedItems, i.LootBoxes,
-                           i.CommonCrates, i.RareCrates, i.EpicCrates, i.LegendaryCrates,
-                           l.PrimaryWeaponId, l.SecondaryWeaponId, l.MeleeWeaponId, l.GrenadeId, 
-                           l.PlayerSkinId
-                    FROM Players p
-                    LEFT JOIN PlayerInventory i ON p.PlayerId = i.PlayerId
-                    LEFT JOIN PlayerLoadout l ON p.PlayerId = l.PlayerId
-                    WHERE LOWER(p.Username) = LOWER(@Username)";
-                command.Parameters.AddWithValue("@Username", username);
 
-                using (var reader = command.ExecuteReader())
-                {
-                    if (reader.Read())
-                    {
-                        var profile = MapReaderToPlayerProfile(reader);
-                        LoadLoadoutExtras(connection, profile);
-                        LoadBattlePass(connection, profile);
-                        return profile;
-                    }
-                }
-            }
-            return null;
-        }
-
-        private PlayerProfile GetPlayerProfileFromDbById(int playerId)
-        {
-            using (var connection = new SqliteConnection(connectionString))
-            {
-                connection.Open();
-                var command = connection.CreateCommand();
-                command.CommandText = @"
-                    SELECT p.*, i.UnlockedItems, i.LootBoxes,
-                           i.CommonCrates, i.RareCrates, i.EpicCrates, i.LegendaryCrates,
-                           l.PrimaryWeaponId, l.SecondaryWeaponId, l.MeleeWeaponId, l.GrenadeId, 
-                           l.PlayerSkinId
-                    FROM Players p
-                    LEFT JOIN PlayerInventory i ON p.PlayerId = i.PlayerId
-                    LEFT JOIN PlayerLoadout l ON p.PlayerId = l.PlayerId
-                    WHERE p.PlayerId = @PlayerId";
-                command.Parameters.AddWithValue("@PlayerId", playerId);
-
-                using (var reader = command.ExecuteReader())
-                {
-                    if (reader.Read())
-                    {
-                        var profile = MapReaderToPlayerProfile(reader);
-                        LoadLoadoutExtras(connection, profile);
-                        LoadBattlePass(connection, profile);
-                        return profile;
-                    }
-                }
-            }
-            return null;
-        }
 
         /// <summary>
         /// Adds a column to an existing table, ignoring the error when it is already there.
@@ -656,24 +170,6 @@ namespace ServerFpsProjectZero.Networking
         /// introduced would never gain it.
         /// </summary>
         /// <returns>True when the column was actually added by this call.</returns>
-        private static bool AddColumnIfMissing(SqliteConnection connection, string table, string column, string definition)
-        {
-            try
-            {
-                using (var alter = connection.CreateCommand())
-                {
-                    alter.CommandText = $"ALTER TABLE {table} ADD COLUMN {column} {definition}";
-                    alter.ExecuteNonQuery();
-                    Console.WriteLine($"[Database] Added column {table}.{column}");
-                    return true;
-                }
-            }
-            catch (SqliteException ex) when (ex.Message.Contains("duplicate column name"))
-            {
-                // Already present - the normal case for an up-to-date database.
-                return false;
-            }
-        }
 
         /// <summary>
         /// One-time migration: copies OwnedWeapons / OwnedSkins / OwnedGrenades into the single
@@ -685,246 +181,29 @@ namespace ServerFpsProjectZero.Networking
         ///
         /// Entries that already exist in UnlockedItems are skipped, so running this twice is safe.
         /// </summary>
-        private void FoldLegacyOwnedItemsIntoUnlocked(SqliteConnection connection)
-        {
-            var legacyColumns = new[] { "OwnedWeapons", "OwnedSkins", "OwnedGrenades" };
-
-            // Only attempt this if the legacy columns are actually present.
-            var present = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            using (var probe = connection.CreateCommand())
-            {
-                probe.CommandText = "SELECT name FROM pragma_table_info('PlayerInventory')";
-                using (var reader = probe.ExecuteReader())
-                {
-                    while (reader.Read())
-                        present.Add(reader.GetString(0));
-                }
-            }
-
-            var usable = legacyColumns.Where(c => present.Contains(c)).ToList();
-            if (usable.Count == 0)
-                return;
-
-            int migrated = 0;
-            using (var read = connection.CreateCommand())
-            {
-                read.CommandText = $@"SELECT PlayerId, {string.Join(", ", usable)}
-                                      FROM PlayerInventory";
-                using (var reader = read.ExecuteReader())
-                {
-                    var rows = new List<(long PlayerId, List<int> Ids)>();
-                    while (reader.Read())
-                    {
-                        long playerId = reader.GetInt64(0);
-                        var ids = new List<int>();
-
-                        for (int i = 0; i < usable.Count; i++)
-                        {
-                            if (reader.IsDBNull(i + 1)) continue;
-                            var json = reader.GetString(i + 1);
-                            if (string.IsNullOrWhiteSpace(json)) continue;
-
-                            try
-                            {
-                                var parsed = JsonConvert.DeserializeObject<List<int>>(json);
-                                if (parsed != null) ids.AddRange(parsed);
-                            }
-                            catch (JsonException)
-                            {
-                                // Leave a malformed legacy value alone rather than failing startup.
-                            }
-                        }
-
-                        if (ids.Count > 0)
-                            rows.Add((playerId, ids));
-                    }
-                    reader.Close();
-
-                    using (var write = connection.CreateCommand())
-                    {
-                        write.CommandText = "UPDATE PlayerInventory SET UnlockedItems = @Items WHERE PlayerId = @PlayerId";
-                        var itemsParam = write.Parameters.Add("@Items", SqliteType.Text);
-                        var idParam = write.Parameters.Add("@PlayerId", SqliteType.Integer);
-
-                        foreach (var (playerId, ids) in rows)
-                        {
-                            // Distinct: the same id could appear in two legacy columns.
-                            itemsParam.Value = JsonConvert.SerializeObject(ids.Distinct().OrderBy(x => x).ToList());
-                            idParam.Value = playerId;
-                            write.ExecuteNonQuery();
-                            migrated++;
-                        }
-                    }
-                }
-            }
-
-            Console.WriteLine($"[Database] Migrated owned items into UnlockedItems for {migrated} player(s) " +
-                              $"from {string.Join(", ", usable)}");
-        }
 
         /// <summary>
         /// One-time migration: the old single WeaponSkinId column applied to whichever gun was
         /// in the primary slot. Copies it into the per-gun assignment table as the skin for that
         /// player's primary weapon, so an existing assignment is not silently lost.
         /// </summary>
-        private void FoldLegacyWeaponSkinIntoAssignments(SqliteConnection connection)
-        {
-            // Only run while the new table is still empty for that player.
-            int migrated = 0;
-            using (var read = connection.CreateCommand())
-            {
-                read.CommandText = @"
-                    SELECT l.PlayerId, l.PrimaryWeaponId, l.WeaponSkinId
-                    FROM PlayerLoadout l
-                    WHERE l.WeaponSkinId IS NOT NULL
-                      AND l.WeaponSkinId > 0
-                      AND NOT EXISTS (SELECT 1 FROM PlayerWeaponSkins s WHERE s.PlayerId = l.PlayerId)";
-                using (var reader = read.ExecuteReader())
-                {
-                    var rows = new List<(long PlayerId, int WeaponId, int SkinId)>();
-                    while (reader.Read())
-                    {
-                        rows.Add((reader.GetInt64(0), reader.GetInt32(1), reader.GetInt32(2)));
-                    }
-                    reader.Close();
-
-                    if (rows.Count == 0) return;
-
-                    using (var write = connection.CreateCommand())
-                    {
-                        write.CommandText = @"INSERT OR REPLACE INTO PlayerWeaponSkins
-                                              (PlayerId, WeaponId, SkinId, UpdatedAt)
-                                              VALUES (@PlayerId, @WeaponId, @SkinId, @UpdatedAt)";
-                        var p = write.Parameters.Add("@PlayerId", SqliteType.Integer);
-                        var w = write.Parameters.Add("@WeaponId", SqliteType.Integer);
-                        var s = write.Parameters.Add("@SkinId", SqliteType.Integer);
-                        write.Parameters.AddWithValue("@UpdatedAt", DateTime.UtcNow.ToString("o"));
-
-                        foreach (var (playerId, weaponId, skinId) in rows)
-                        {
-                            p.Value = playerId;
-                            w.Value = weaponId;
-                            s.Value = skinId;
-                            write.ExecuteNonQuery();
-                            migrated++;
-                        }
-                    }
-                }
-            }
-
-            if (migrated > 0)
-                Console.WriteLine($"[Database] Migrated legacy WeaponSkinId into per-gun assignments for {migrated} player(s)");
-        }
 
         /// <summary>
         /// Loads the battle pass row for a profile. A missing row is normal for an account
         /// created before the season existed (or for a brand new account), so it starts at
         /// tier 1 rather than failing the login.
         /// </summary>
-        private void LoadBattlePass(SqliteConnection connection, PlayerProfile profile)
-        {
-            if (profile == null) return;
 
-            var state = new BattlePassState();
-
-            using (var cmd = connection.CreateCommand())
-            {
-                cmd.CommandText = @"SELECT SeasonId, Xp, Premium, ClaimedFree, ClaimedPremium
-                                    FROM PlayerBattlePass WHERE PlayerId = @PlayerId";
-                cmd.Parameters.AddWithValue("@PlayerId", profile.PlayerId);
-
-                using var reader = cmd.ExecuteReader();
-                if (reader.Read())
-                {
-                    state.SeasonId = reader.GetInt32(0);
-                    state.Xp = reader.GetInt32(1);
-                    state.PremiumUnlocked = reader.GetInt32(2) != 0;
-                    state.ClaimedFreeTiers = ParseTierList(reader.IsDBNull(3) ? null : reader.GetString(3));
-                    state.ClaimedPremiumTiers = ParseTierList(reader.IsDBNull(4) ? null : reader.GetString(4));
-                }
-            }
-
-            BattlePassCatalog.Normalize(state);
-            profile.BattlePass = state;
-        }
-
-        private static List<int> ParseTierList(string json)
-        {
-            if (string.IsNullOrWhiteSpace(json)) return new List<int>();
-
-            try
-            {
-                return JsonConvert.DeserializeObject<List<int>>(json) ?? new List<int>();
-            }
-            catch (JsonException)
-            {
-                // A malformed list must not block login; the player simply has nothing claimed.
-                return new List<int>();
-            }
-        }
 
         /// <summary>
         /// Writes the battle pass row. Upsert rather than update-only so the first save for an
         /// account that predates the season creates the row.
         /// </summary>
-        private void UpdatePlayerBattlePass(Player player)
-        {
-            if (player == null) return;
-
-            var state = player.BattlePass ?? new BattlePassState();
-            BattlePassCatalog.Normalize(state);
-            player.BattlePass = state;
-
-            using (var connection = new SqliteConnection(connectionString))
-            {
-                connection.Open();
-                using var command = connection.CreateCommand();
-                command.CommandText = @"
-                    INSERT OR REPLACE INTO PlayerBattlePass
-                        (PlayerId, SeasonId, Xp, Premium, ClaimedFree, ClaimedPremium, UpdatedAt)
-                    VALUES
-                        (@PlayerId, @SeasonId, @Xp, @Premium, @ClaimedFree, @ClaimedPremium, @UpdatedAt)";
-                command.Parameters.AddWithValue("@PlayerId", player.PlayerId);
-                command.Parameters.AddWithValue("@SeasonId", state.SeasonId);
-                command.Parameters.AddWithValue("@Xp", state.Xp);
-                command.Parameters.AddWithValue("@Premium", state.PremiumUnlocked ? 1 : 0);
-                command.Parameters.AddWithValue("@ClaimedFree", JsonConvert.SerializeObject(state.ClaimedFreeTiers));
-                command.Parameters.AddWithValue("@ClaimedPremium", JsonConvert.SerializeObject(state.ClaimedPremiumTiers));
-                command.Parameters.AddWithValue("@UpdatedAt", DateTime.UtcNow.ToString("o"));
-                command.ExecuteNonQuery();
-            }
-        }
 
         /// <summary>
         /// Gives season XP for a completed match or co-op run, persists it, and pushes the new
         /// state to the player so the panel can update without a profile re-fetch.
         /// </summary>
-        private void AwardBattlePassXp(Player player, int xp, string source)
-        {
-            if (player == null || xp <= 0) return;
-
-            if (player.BattlePass == null)
-                player.BattlePass = new BattlePassState();
-
-            int tiersGained = BattlePassCatalog.AddXp(player.BattlePass, xp);
-            UpdatePlayerBattlePass(player);
-
-            var client = serverManager.GetClientById(player.PlayerId);
-            if (client != null && client.IsConnected)
-            {
-                serverManager.SendPacket(new BattlePassXpUpdate
-                {
-                    state = player.BattlePass,
-                    xpGained = xp,
-                    tiersGained = tiersGained,
-                    source = source
-                }, client);
-            }
-
-            Console.WriteLine($"[BattlePass] {player.Username} +{xp} season XP ({source}) " +
-                              $"- tier {player.BattlePass.Tier}, {player.BattlePass.Xp} total" +
-                              (tiersGained > 0 ? $", +{tiersGained} tier(s)" : ""));
-        }
 
         private void HandleBattlePassGet(string jsonData, IPEndPoint clientEndpoint)
         {
@@ -960,151 +239,14 @@ namespace ServerFpsProjectZero.Networking
                 return;
             }
 
-            if (player.BattlePass == null)
-                player.BattlePass = new BattlePassState();
+            BattlePassClaimResult result = battlePassService.Claim(player, request.tier, request.premium);
+            serverManager.SendPacket(result, clientEndpoint);
 
-            BattlePassCatalog.Normalize(player.BattlePass);
-
-            BattlePassReward reward = BattlePassCatalog.GetReward(request.tier, request.premium);
-            string failure = null;
-
-            if (reward == null)
+            if (result.success)
             {
-                failure = "No reward exists at that tier.";
+                Console.WriteLine($"[BattlePass] {player.Username} claimed tier {request.tier} " +
+                                  $"{(request.premium ? "paid" : "free")}: {result.reward?.Label} ({result.message})");
             }
-            else if (request.tier > player.BattlePass.Tier)
-            {
-                failure = $"Tier {request.tier} is locked. Reach tier {request.tier} first.";
-            }
-            else if (request.premium && !player.BattlePass.PremiumUnlocked)
-            {
-                failure = "The premium track is not unlocked.";
-            }
-            else if (BattlePassCatalog.IsClaimed(player.BattlePass, request.tier, request.premium))
-            {
-                failure = "That reward has already been claimed.";
-            }
-
-            if (failure != null)
-            {
-                serverManager.SendPacket(new BattlePassClaimResult
-                {
-                    success = false,
-                    message = failure,
-                    tier = request.tier,
-                    premium = request.premium,
-                    state = player.BattlePass,
-                    inventory = player.Inventory,
-                    gold = player.Gold
-                }, clientEndpoint);
-                return;
-            }
-
-            string grantMessage = GrantBattlePassReward(player, reward);
-
-            List<int> claimed = request.premium
-                ? player.BattlePass.ClaimedPremiumTiers
-                : player.BattlePass.ClaimedFreeTiers;
-            if (!claimed.Contains(request.tier))
-                claimed.Add(request.tier);
-
-            BattlePassCatalog.Normalize(player.BattlePass);
-
-            UpdatePlayerProfile(player);   // also writes the battle pass row
-            UpdatePlayerInventory(player);
-            UpdatePlayerLoadout(player);
-
-            serverManager.SendPacket(new BattlePassClaimResult
-            {
-                success = true,
-                message = grantMessage,
-                tier = request.tier,
-                premium = request.premium,
-                state = player.BattlePass,
-                reward = reward,
-                inventory = player.Inventory,
-                gold = player.Gold
-            }, clientEndpoint);
-
-            Console.WriteLine($"[BattlePass] {player.Username} claimed tier {request.tier} " +
-                              $"{(request.premium ? "premium" : "free")}: {reward.Label} ({grantMessage})");
-        }
-
-        /// <summary>
-        /// Applies one reward to the account. Duplicate item grants convert to Gold so a player
-        /// can never be left with an unclaimable tier whose item they already own.
-        /// </summary>
-        private string GrantBattlePassReward(Player player, BattlePassReward reward)
-        {
-            switch (reward.Kind)
-            {
-                case RewardKind.Gold:
-                    player.AddGold(reward.Amount);
-                    return $"+{reward.Amount} Gold";
-
-                case RewardKind.Shards:
-                    switch (reward.ShardTier)
-                    {
-                        case ShardTier.Common: player.CommonShards += reward.Amount; break;
-                        case ShardTier.Rare: player.RareShards += reward.Amount; break;
-                        case ShardTier.Epic: player.EpicShards += reward.Amount; break;
-                        case ShardTier.Legendary: player.LegendaryShards += reward.Amount; break;
-                    }
-                    return $"+{reward.Amount} {reward.ShardTier} Shards";
-
-                case RewardKind.Crate:
-                    switch (reward.ShardTier)
-                    {
-                        case ShardTier.Common: player.Inventory.CommonCrates++; break;
-                        case ShardTier.Rare: player.Inventory.RareCrates++; break;
-                        case ShardTier.Epic: player.Inventory.EpicCrates++; break;
-                        case ShardTier.Legendary: player.Inventory.LegendaryCrates++; break;
-                    }
-                    return $"+1 {reward.ShardTier} Crate";
-
-                case RewardKind.Item:
-                    return GrantItem(player, reward.ItemId);
-
-                default:
-                    return "Reward granted";
-            }
-        }
-
-        private string GrantItem(Player player, int itemId)
-        {
-            CatalogWeapon weapon = ItemCatalog.GetWeapon(itemId);
-            CatalogSkin skin = ItemCatalog.GetSkin(itemId);
-
-            if (weapon == null && skin == null)
-                return "Unknown item (no grant)";
-
-            if (player.HasItem(itemId))
-            {
-                // Duplicate: convert to Gold rather than silently wasting the tier.
-                player.AddGold(100);
-                return $"Already owned - converted to +100 Gold";
-            }
-
-            player.UnlockItem(itemId);
-
-            if (skin != null)
-            {
-                if (skin.IsCharacter)
-                {
-                    if (player.Loadout.CharacterSkins == null)
-                        player.Loadout.CharacterSkins = new List<int>();
-                    if (!player.Loadout.CharacterSkins.Contains(skin.Id))
-                        player.Loadout.CharacterSkins.Add(skin.Id);
-                }
-                else
-                {
-                    // A skin is useless without its gun, so unlock the base weapon too.
-                    if (!player.HasItem(skin.WeaponId))
-                        player.UnlockItem(skin.WeaponId);
-                }
-            }
-
-            return $"+{ItemCatalog.GetName(itemId)}";
         }
 
         private void HandleBattlePassBuyPremium(string jsonData, IPEndPoint clientEndpoint)
@@ -1118,47 +260,11 @@ namespace ServerFpsProjectZero.Networking
                 return;
             }
 
-            if (player.BattlePass == null)
-                player.BattlePass = new BattlePassState();
+            BattlePassPurchaseResult result = battlePassService.BuyPremium(player);
+            serverManager.SendPacket(result, clientEndpoint);
 
-            BattlePassCatalog.Normalize(player.BattlePass);
-
-            string failure = null;
-            if (player.BattlePass.PremiumUnlocked)
-                failure = "The premium track is already unlocked.";
-            else if (player.Gold < BattlePassCatalog.PremiumPrice)
-                failure = $"Not enough Gold. Premium costs {BattlePassCatalog.PremiumPrice} Gold.";
-
-            if (failure != null)
-            {
-                serverManager.SendPacket(new BattlePassPurchaseResult
-                {
-                    success = false,
-                    message = failure,
-                    state = player.BattlePass,
-                    gold = player.Gold
-                }, clientEndpoint);
-                return;
-            }
-
-            player.DeductGold(BattlePassCatalog.PremiumPrice);
-            player.BattlePass.PremiumUnlocked = true;
-            BattlePassCatalog.Normalize(player.BattlePass);
-
-            UpdatePlayerProfile(player);
-            UpdatePlayerInventory(player);
-            UpdatePlayerLoadout(player);
-
-            serverManager.SendPacket(new BattlePassPurchaseResult
-            {
-                success = true,
-                message = "Premium track unlocked!",
-                state = player.BattlePass,
-                gold = player.Gold
-            }, clientEndpoint);
-
-            Console.WriteLine($"[BattlePass] {player.Username} unlocked the premium track " +
-                              $"for {BattlePassCatalog.PremiumPrice} Gold");
+            if (result.success)
+                Console.WriteLine($"[BattlePass] {player.Username} unlocked the paid pass.");
         }
 
         private void HandleGetInventory(string jsonData, IPEndPoint clientEndpoint)
@@ -1193,533 +299,54 @@ namespace ServerFpsProjectZero.Networking
                 return;
             }
 
-            EquipResponse response = TryEquip(player, request);
+            EquipResponse response = equipService.Equip(player, request);
             serverManager.SendPacket(response, clientEndpoint);
 
             if (response.Success)
-            {
-                UpdatePlayerLoadout(player);
-                UpdatePlayerInventory(player);
                 Console.WriteLine($"[Equip] {player.Username}: {response.Message}");
-            }
-        }
-
-        /// <summary>
-        /// Validates and applies one equip request. Server-authoritative: ownership and
-        /// slot compatibility are checked here, never trusted from the client.
-        /// </summary>
-        private EquipResponse TryEquip(Player player, EquipRequest request)
-        {
-            string slot = (request.slotType ?? "").Trim().ToLowerInvariant();
-
-            if (!player.HasItem(request.itemId))
-            {
-                return new EquipResponse
-                {
-                    Success = false,
-                    Message = "You do not own that item.",
-                    Loadout = player.Loadout,
-                    Inventory = player.Inventory,
-                    Gold = player.Gold
-                };
-            }
-
-            CatalogWeapon weapon = ItemCatalog.GetWeapon(request.itemId);
-            CatalogSkin skin = ItemCatalog.GetSkin(request.itemId);
-
-            string message;
-
-            if (weapon != null)
-            {
-                string targetSlot = string.IsNullOrEmpty(slot) || slot == "weapon" ? weapon.Slot : slot;
-
-                if (targetSlot != weapon.Slot)
-                {
-                    return new EquipResponse
-                    {
-                        Success = false,
-                        Message = $"{weapon.Name} cannot go in the {targetSlot} slot.",
-                        Loadout = player.Loadout,
-                        Inventory = player.Inventory,
-                        Gold = player.Gold
-                    };
-                }
-
-                switch (targetSlot)
-                {
-                    case "primary": player.Loadout.PrimaryWeaponId = weapon.Id; break;
-                    case "secondary": player.Loadout.SecondaryWeaponId = weapon.Id; break;
-                    case "melee": player.Loadout.MeleeWeaponId = weapon.Id; break;
-                    case "grenade": player.Loadout.GrenadeId = weapon.Id; break;
-                    default:
-                        return new EquipResponse
-                        {
-                            Success = false,
-                            Message = "Unknown weapon slot.",
-                            Loadout = player.Loadout,
-                            Inventory = player.Inventory,
-                            Gold = player.Gold
-                        };
-                }
-
-                message = $"Equipped {weapon.Name}.";
-            }
-            else if (skin != null && skin.IsCharacter)
-            {
-                if (player.Loadout.CharacterSkins == null)
-                    player.Loadout.CharacterSkins = new List<int>();
-                if (!player.Loadout.CharacterSkins.Contains(skin.Id))
-                    player.Loadout.CharacterSkins.Add(skin.Id);
-
-                player.Loadout.PlayerSkinId = skin.Id;
-                message = $"Wearing {skin.Name}.";
-            }
-            else if (skin != null)
-            {
-                if (!player.HasItem(skin.WeaponId))
-                {
-                    return new EquipResponse
-                    {
-                        Success = false,
-                        Message = $"You need the {ItemCatalog.GetName(skin.WeaponId)} to use this skin.",
-                        Loadout = player.Loadout,
-                        Inventory = player.Inventory,
-                        Gold = player.Gold
-                    };
-                }
-
-                if (player.Loadout.WeaponSkins == null)
-                    player.Loadout.WeaponSkins = new Dictionary<int, int>();
-
-                player.Loadout.WeaponSkins[skin.WeaponId] = skin.Id;
-                message = $"Applied {skin.Name} to {ItemCatalog.GetName(skin.WeaponId)}.";
-            }
-            else
-            {
-                return new EquipResponse
-                {
-                    Success = false,
-                    Message = "Unknown item.",
-                    Loadout = player.Loadout,
-                    Inventory = player.Inventory,
-                    Gold = player.Gold
-                };
-            }
-
-            return new EquipResponse
-            {
-                Success = true,
-                Message = message,
-                Loadout = player.Loadout,
-                Inventory = player.Inventory,
-                Gold = player.Gold
-            };
-        }
-
-        /// <summary>
-        /// Loads the per-gun skin assignments and the owned character skins for a profile.
-        ///
-        /// These live in their own tables rather than as columns on PlayerLoadout, so they are
-        /// fetched separately. Called while the profile reader is still open, on the same
-        /// connection.
-        /// </summary>
-        private void LoadLoadoutExtras(SqliteConnection connection, PlayerProfile profile)
-        {
-            if (profile?.Loadout == null) return;
-
-            profile.Loadout.WeaponSkins ??= new Dictionary<int, int>();
-            profile.Loadout.CharacterSkins ??= new List<int>();
-
-            using (var cmd = connection.CreateCommand())
-            {
-                cmd.CommandText = "SELECT WeaponId, SkinId FROM PlayerWeaponSkins WHERE PlayerId = @PlayerId";
-                cmd.Parameters.AddWithValue("@PlayerId", profile.PlayerId);
-                using var reader = cmd.ExecuteReader();
-                while (reader.Read())
-                {
-                    // Last write wins if a duplicate somehow exists; the primary key prevents it.
-                    profile.Loadout.WeaponSkins[reader.GetInt32(0)] = reader.GetInt32(1);
-                }
-            }
-
-            using (var cmd = connection.CreateCommand())
-            {
-                cmd.CommandText = @"SELECT SkinId FROM PlayerCharacterSkins
-                                    WHERE PlayerId = @PlayerId
-                                    ORDER BY SortOrder, SkinId";
-                cmd.Parameters.AddWithValue("@PlayerId", profile.PlayerId);
-                using var reader = cmd.ExecuteReader();
-                while (reader.Read())
-                {
-                    profile.Loadout.CharacterSkins.Add(reader.GetInt32(0));
-                }
-            }
-
-            // Never advertise wearing a skin the player does not own.
-            if (profile.Loadout.CharacterSkins.Count > 0
-                && !profile.Loadout.CharacterSkins.Contains(profile.Loadout.PlayerSkinId))
-            {
-                profile.Loadout.PlayerSkinId = profile.Loadout.CharacterSkins[0];
-            }
-        }
-
-        /// <summary>
-        /// Gives every player the character skin they are currently wearing.
-        ///
-        /// The list of owned character skins is new, so a player migrating from the old schema
-        /// had an empty list while PlayerSkinId still pointed at a skin. Without this they would
-        /// be wearing something they do not own, and any "is this skin owned" check would fail.
-        /// Idempotent: players who already own their worn skin are skipped.
-        /// </summary>
-        private void BackfillCharacterSkinsFromWorn(SqliteConnection connection)
-        {
-            int backfilled = 0;
-            using (var read = connection.CreateCommand())
-            {
-                read.CommandText = @"
-                    SELECT l.PlayerId, l.PlayerSkinId
-                    FROM PlayerLoadout l
-                    WHERE l.PlayerSkinId IS NOT NULL
-                      AND l.PlayerSkinId > 0
-                      AND NOT EXISTS (
-                          SELECT 1 FROM PlayerCharacterSkins s
-                          WHERE s.PlayerId = l.PlayerId AND s.SkinId = l.PlayerSkinId)";
-                using (var reader = read.ExecuteReader())
-                {
-                    var rows = new List<(long PlayerId, int SkinId)>();
-                    while (reader.Read())
-                        rows.Add((reader.GetInt64(0), reader.GetInt32(1)));
-                    reader.Close();
-
-                    if (rows.Count == 0) return;
-
-                    using var write = connection.CreateCommand();
-                    write.CommandText = @"INSERT OR REPLACE INTO PlayerCharacterSkins
-                                          (PlayerId, SkinId, SortOrder) VALUES (@PlayerId, @SkinId, 0)";
-                    var p = write.Parameters.Add("@PlayerId", SqliteType.Integer);
-                    var s = write.Parameters.Add("@SkinId", SqliteType.Integer);
-
-                    foreach (var (playerId, skinId) in rows)
-                    {
-                        p.Value = playerId;
-                        s.Value = skinId;
-                        write.ExecuteNonQuery();
-                        backfilled++;
-                    }
-                }
-            }
-
-            if (backfilled > 0)
-                Console.WriteLine($"[Database] Backfilled owned character skins for {backfilled} player(s)");
-        }
-
-        private PlayerProfile MapReaderToPlayerProfile(SqliteDataReader reader)
-        {
-            var profile = new PlayerProfile
-            {
-                PlayerId = reader.GetInt32(reader.GetOrdinal("PlayerId")),
-                Username = reader.GetString(reader.GetOrdinal("Username")),
-                Email = reader.GetString(reader.GetOrdinal("Email")),
-                Level = reader.GetInt32(reader.GetOrdinal("Level")),
-                Experience = reader.GetInt32(reader.GetOrdinal("Experience")),
-                ExperienceToNextLevel = reader.GetInt32(reader.GetOrdinal("ExperienceToNextLevel")),
-                Gold = reader.GetInt32(reader.GetOrdinal("Gold")),
-                Money = (int)reader.GetDouble(reader.GetOrdinal("Money")),
-                CommonShards = reader.GetInt32(reader.GetOrdinal("CommonShards")),
-                RareShards = reader.GetInt32(reader.GetOrdinal("RareShards")),
-                EpicShards = reader.GetInt32(reader.GetOrdinal("EpicShards")),
-                LegendaryShards = reader.GetInt32(reader.GetOrdinal("LegendaryShards")),
-                MMR = reader.GetInt32(reader.GetOrdinal("MMR")),
-                Rank = reader.GetInt32(reader.GetOrdinal("Rank")),
-                TotalStats = new PlayerStats
-                {
-                    TotalMatches = reader.GetInt32(reader.GetOrdinal("TotalMatches")),
-                    TotalWins = reader.GetInt32(reader.GetOrdinal("TotalWins")),
-                    TotalLosses = reader.GetInt32(reader.GetOrdinal("TotalLosses")),
-                    TotalKills = reader.GetInt32(reader.GetOrdinal("TotalKills")),
-                    TotalDeaths = reader.GetInt32(reader.GetOrdinal("TotalDeaths")),
-                    TotalHeadshots = reader.GetInt32(reader.GetOrdinal("TotalHeadshots")),
-                    TotalAssists = reader.GetInt32(reader.GetOrdinal("TotalAssists")),
-                    WinRate = (float)reader.GetDouble(reader.GetOrdinal("WinRate")),
-                    KDRatio = (float)reader.GetDouble(reader.GetOrdinal("KDRatio"))
-                },
-                Inventory = new PlayerInventory
-                {
-                    UnlockedItems = JsonConvert.DeserializeObject<List<int>>(reader.GetString(reader.GetOrdinal("UnlockedItems"))),
-                    LootBoxes = JsonConvert.DeserializeObject<List<LootBox>>(reader.GetString(reader.GetOrdinal("LootBoxes"))),
-                    CommonCrates = reader.GetInt32(reader.GetOrdinal("CommonCrates")),
-                    RareCrates = reader.GetInt32(reader.GetOrdinal("RareCrates")),
-                    EpicCrates = reader.GetInt32(reader.GetOrdinal("EpicCrates")),
-                    LegendaryCrates = reader.GetInt32(reader.GetOrdinal("LegendaryCrates"))
-                },
-                Loadout = new PlayerLoadout
-                {
-                    PrimaryWeaponId = reader.GetInt32(reader.GetOrdinal("PrimaryWeaponId")),
-                    SecondaryWeaponId = reader.GetInt32(reader.GetOrdinal("SecondaryWeaponId")),
-                    MeleeWeaponId = reader.GetInt32(reader.GetOrdinal("MeleeWeaponId")),
-                    GrenadeId = reader.GetInt32(reader.GetOrdinal("GrenadeId")),
-                    PlayerSkinId = reader.GetInt32(reader.GetOrdinal("PlayerSkinId")),
-                    // Per-gun skins and character skins live in their own tables; loaded by
-                    // LoadLoadoutExtras so this mapper stays a pure column read.
-                    WeaponSkins = new Dictionary<int, int>(),
-                    CharacterSkins = new List<int>()
-                },
-                TotalPlayTime = TimeSpan.FromTicks(reader.GetInt64(reader.GetOrdinal("TotalPlayTimeTicks"))),
-                CreatedAt = ParseUtc(reader.GetString(reader.GetOrdinal("CreatedAt"))),
-                LastLogin = ParseUtc(reader.GetString(reader.GetOrdinal("LastLogin"))),
-                LoginStreak = reader.GetInt32(reader.GetOrdinal("LoginStreak")),
-                // Loaded separately by LoadBattlePass: the progress lives in its own table.
-                BattlePass = new BattlePassState()
-            };
-
-            return profile;
-        }
-
-        /// <summary>
-        /// Reads a timestamp written with "o" (UTC, trailing Z) without converting it to local
-        /// time. DateTime.Parse's default is local, which made a UTC LastLogin look like
-        /// "tomorrow" in positive-offset zones and re-granted the daily reward every day.
-        /// </summary>
-        private static DateTime ParseUtc(string text)
-        {
-            if (string.IsNullOrEmpty(text)) return DateTime.UtcNow;
-
-            return DateTime.Parse(text, CultureInfo.InvariantCulture,
-                DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal);
-        }
-
-        private bool UsernameExists(string username)
-        {
-            using (var connection = new SqliteConnection(connectionString))
-            {
-                connection.Open();
-                var command = connection.CreateCommand();
-                command.CommandText = "SELECT COUNT(*) FROM Players WHERE LOWER(Username) = LOWER(@Username)";
-                command.Parameters.AddWithValue("@Username", username);
-                return Convert.ToInt32(command.ExecuteScalar()) > 0;
-            }
-        }
-
-        private bool EmailExists(string email)
-        {
-            using (var connection = new SqliteConnection(connectionString))
-            {
-                connection.Open();
-                var command = connection.CreateCommand();
-                command.CommandText = "SELECT COUNT(*) FROM Players WHERE LOWER(Email) = LOWER(@Email)";
-                command.Parameters.AddWithValue("@Email", email);
-                return Convert.ToInt32(command.ExecuteScalar()) > 0;
-            }
-        }
-
-        private void UpdatePlayerProfile(Player player)
-        {
-            using (var connection = new SqliteConnection(connectionString))
-            {
-                connection.Open();
-                var command = connection.CreateCommand();
-                command.CommandText = @"
-                    UPDATE Players SET 
-                        Level = @Level,
-                        Experience = @Experience,
-                        ExperienceToNextLevel = @ExperienceToNextLevel,
-                        Gold = @Gold,
-                        Money = @Money,
-                        CommonShards = @CommonShards,
-                        RareShards = @RareShards,
-                        EpicShards = @EpicShards,
-                        LegendaryShards = @LegendaryShards,
-                        MMR = @MMR,
-                        Rank = @Rank,
-                        TotalMatches = @TotalMatches,
-                        TotalWins = @TotalWins,
-                        TotalLosses = @TotalLosses,
-                        TotalKills = @TotalKills,
-                        TotalDeaths = @TotalDeaths,
-                        TotalHeadshots = @TotalHeadshots,
-                        TotalAssists = @TotalAssists,
-                        WinRate = @WinRate,
-                        KDRatio = @KDRatio,
-                        TotalPlayTimeTicks = @TotalPlayTimeTicks,
-                        LastLogin = @LastLogin,
-                        LoginStreak = @LoginStreak
-                    WHERE PlayerId = @PlayerId";
-
-                command.Parameters.AddWithValue("@Level", player.Level);
-                command.Parameters.AddWithValue("@Experience", player.Experience);
-                command.Parameters.AddWithValue("@ExperienceToNextLevel", player.ExperienceToNextLevel);
-                command.Parameters.AddWithValue("@Gold", player.Gold);
-                command.Parameters.AddWithValue("@Money", player.Money);
-                command.Parameters.AddWithValue("@CommonShards", player.CommonShards);
-                command.Parameters.AddWithValue("@RareShards", player.RareShards);
-                command.Parameters.AddWithValue("@EpicShards", player.EpicShards);
-                command.Parameters.AddWithValue("@LegendaryShards", player.LegendaryShards);
-                command.Parameters.AddWithValue("@MMR", player.MMR);
-                command.Parameters.AddWithValue("@Rank", player.Rank);
-
-                if (player.Stats != null)
-                {
-                    command.Parameters.AddWithValue("@TotalMatches", player.Stats.TotalMatches);
-                    command.Parameters.AddWithValue("@TotalWins", player.Stats.TotalWins);
-                    command.Parameters.AddWithValue("@TotalLosses", player.Stats.TotalLosses);
-                    command.Parameters.AddWithValue("@TotalKills", player.Stats.TotalKills);
-                    command.Parameters.AddWithValue("@TotalDeaths", player.Stats.TotalDeaths);
-                    command.Parameters.AddWithValue("@TotalHeadshots", player.Stats.TotalHeadshots);
-                    command.Parameters.AddWithValue("@TotalAssists", player.Stats.TotalAssists);
-                    command.Parameters.AddWithValue("@WinRate", player.Stats.WinRate);
-                    command.Parameters.AddWithValue("@KDRatio", player.Stats.KDRatio);
-                }
-
-                command.Parameters.AddWithValue("@TotalPlayTimeTicks", player.TotalPlayTime.Ticks);
-                command.Parameters.AddWithValue("@LastLogin", DateTime.UtcNow.ToString("o"));
-                command.Parameters.AddWithValue("@LoginStreak", player.LoginStreak);
-                command.Parameters.AddWithValue("@PlayerId", player.PlayerId);
-
-                command.ExecuteNonQuery();
-            }
-
-            // The battle pass lives in its own table but is saved with the profile so every
-            // existing save path (login, match end, logout) keeps it current.
-            UpdatePlayerBattlePass(player);
-        }
-
-        private void UpdatePlayerInventory(Player player)
-        {
-            if (player.Inventory == null) return;
-
-            using (var connection = new SqliteConnection(connectionString))
-            {
-                connection.Open();
-                var command = connection.CreateCommand();
-                command.CommandText = @"
-                    UPDATE PlayerInventory SET
-                        UnlockedItems = @UnlockedItems,
-                        LootBoxes = @LootBoxes,
-                        CommonCrates = @CommonCrates,
-                        RareCrates = @RareCrates,
-                        EpicCrates = @EpicCrates,
-                        LegendaryCrates = @LegendaryCrates
-                    WHERE PlayerId = @PlayerId";
-
-                command.Parameters.AddWithValue("@UnlockedItems", JsonConvert.SerializeObject(player.Inventory.UnlockedItems));
-                command.Parameters.AddWithValue("@LootBoxes", JsonConvert.SerializeObject(player.Inventory.LootBoxes));
-                command.Parameters.AddWithValue("@CommonCrates", player.Inventory.CommonCrates);
-                command.Parameters.AddWithValue("@RareCrates", player.Inventory.RareCrates);
-                command.Parameters.AddWithValue("@EpicCrates", player.Inventory.EpicCrates);
-                command.Parameters.AddWithValue("@LegendaryCrates", player.Inventory.LegendaryCrates);
-                command.Parameters.AddWithValue("@PlayerId", player.PlayerId);
-
-                command.ExecuteNonQuery();
-            }
-        }
-
-        /// <summary>
-        /// Persists the loadout: the slot assignments, the per-gun skin assignments, and the
-        /// owned character skins.
-        ///
-        /// The per-gun table is rewritten wholesale for this player rather than diffed - the map
-        /// is tiny, and a clean delete-and-insert cannot drift out of sync with the in-memory
-        /// state the way a partial update can.
-        /// </summary>
-        private void UpdatePlayerLoadout(Player player)
-        {
-            if (player.Loadout == null) return;
-
-            using (var connection = new SqliteConnection(connectionString))
-            {
-                connection.Open();
-                using var transaction = connection.BeginTransaction();
-
-                using (var command = connection.CreateCommand())
-                {
-                    command.Transaction = transaction;
-                    command.CommandText = @"
-                        UPDATE PlayerLoadout SET
-                            PrimaryWeaponId = @PrimaryWeaponId,
-                            SecondaryWeaponId = @SecondaryWeaponId,
-                            MeleeWeaponId = @MeleeWeaponId,
-                            GrenadeId = @GrenadeId,
-                            PlayerSkinId = @PlayerSkinId,
-                            UpdatedAt = @UpdatedAt
-                        WHERE PlayerId = @PlayerId";
-                    command.Parameters.AddWithValue("@PrimaryWeaponId", player.Loadout.PrimaryWeaponId);
-                    command.Parameters.AddWithValue("@SecondaryWeaponId", player.Loadout.SecondaryWeaponId);
-                    command.Parameters.AddWithValue("@MeleeWeaponId", player.Loadout.MeleeWeaponId);
-                    command.Parameters.AddWithValue("@GrenadeId", player.Loadout.GrenadeId);
-                    command.Parameters.AddWithValue("@PlayerSkinId", player.Loadout.PlayerSkinId);
-                    command.Parameters.AddWithValue("@UpdatedAt", DateTime.UtcNow.ToString("o"));
-                    command.Parameters.AddWithValue("@PlayerId", player.PlayerId);
-                    command.ExecuteNonQuery();
-                }
-
-                using (var command = connection.CreateCommand())
-                {
-                    command.Transaction = transaction;
-                    command.CommandText = "DELETE FROM PlayerWeaponSkins WHERE PlayerId = @PlayerId";
-                    command.Parameters.AddWithValue("@PlayerId", player.PlayerId);
-                    command.ExecuteNonQuery();
-                }
-
-                // Only positive skin ids are stored; 0 means "wearing the default skin", which is
-                // the absence of an assignment rather than an assignment to skin 0.
-                var skins = player.Loadout.WeaponSkins;
-                if (skins != null && skins.Count > 0)
-                {
-                    using var command = connection.CreateCommand();
-                    command.Transaction = transaction;
-                    command.CommandText = @"INSERT OR REPLACE INTO PlayerWeaponSkins
-                                            (PlayerId, WeaponId, SkinId, UpdatedAt)
-                                            VALUES (@PlayerId, @WeaponId, @SkinId, @UpdatedAt)";
-                    var p = command.Parameters.Add("@PlayerId", SqliteType.Integer);
-                    var w = command.Parameters.Add("@WeaponId", SqliteType.Integer);
-                    var s = command.Parameters.Add("@SkinId", SqliteType.Integer);
-                    command.Parameters.AddWithValue("@UpdatedAt", DateTime.UtcNow.ToString("o"));
-
-                    foreach (var pair in skins)
-                    {
-                        if (pair.Value <= 0) continue;
-                        p.Value = player.PlayerId;
-                        w.Value = pair.Key;
-                        s.Value = pair.Value;
-                        command.ExecuteNonQuery();
-                    }
-                }
-
-                using (var command = connection.CreateCommand())
-                {
-                    command.Transaction = transaction;
-                    command.CommandText = "DELETE FROM PlayerCharacterSkins WHERE PlayerId = @PlayerId";
-                    command.Parameters.AddWithValue("@PlayerId", player.PlayerId);
-                    command.ExecuteNonQuery();
-                }
-
-                var characters = player.Loadout.CharacterSkins;
-                if (characters != null && characters.Count > 0)
-                {
-                    using var command = connection.CreateCommand();
-                    command.Transaction = transaction;
-                    command.CommandText = @"INSERT OR REPLACE INTO PlayerCharacterSkins
-                                            (PlayerId, SkinId, SortOrder)
-                                            VALUES (@PlayerId, @SkinId, @SortOrder)";
-                    var p = command.Parameters.Add("@PlayerId", SqliteType.Integer);
-                    var s = command.Parameters.Add("@SkinId", SqliteType.Integer);
-                    var o = command.Parameters.Add("@SortOrder", SqliteType.Integer);
-
-                    for (int i = 0; i < characters.Count; i++)
-                    {
-                        p.Value = player.PlayerId;
-                        s.Value = characters[i];
-                        o.Value = i;
-                        command.ExecuteNonQuery();
-                    }
-                }
-
-                transaction.Commit();
-            }
         }
 
         #endregion
 
+        private void ApplyDailyLogin(Player player)
+        {
+            DailyRewardResult reward = dailyRewardService.Apply(player, DateTime.UtcNow);
+            if (reward.AlreadyClaimedToday)
+            {
+                Console.WriteLine($"[LoginManager] Player '{player.Username}' already claimed today's login reward.");
+                return;
+            }
+
+            Console.WriteLine($"[LoginManager] Daily login reward for '{player.Username}': " +
+                              $"streak={reward.Streak}, +{reward.Gold} gold, +{reward.Xp} XP");
+        }
+
+        private void AwardBattlePassXp(Player player, int xp, string source)
+        {
+            if (player == null || xp <= 0) return;
+
+            BattlePassXpAward award = battlePassService.AwardXp(player, xp);
+            var client = serverManager.GetClientById(player.PlayerId);
+            if (client != null && client.IsConnected)
+            {
+                serverManager.SendPacket(new BattlePassXpUpdate
+                {
+                    state = award.State,
+                    xpGained = award.XpGained,
+                    tiersGained = award.TiersGained,
+                    source = source
+                }, client);
+            }
+
+            Console.WriteLine($"[BattlePass] {player.Username} +{xp} season XP ({source}) " +
+                              $"- tier {award.State.Tier}, {award.State.Xp} total" +
+                              (award.TiersGained > 0 ? $", +{award.TiersGained} tier(s)" : ""));
+        }
+
+        public void UpdatePlayerShards(Player player)
+        {
+            store.UpdatePlayerShards(player);
+        }
         #region Packet Handlers
 
         private async void HandleLogin(string jsonData, IPEndPoint clientEndpoint)
@@ -1734,7 +361,7 @@ namespace ServerFpsProjectZero.Networking
             }
 
             // Check if player is already logged in
-            var playerProfile = GetPlayerProfileFromDb(loginRequest.username);
+            var playerProfile = store.GetPlayerProfileFromDb(loginRequest.username);
 
             if (playerProfile == null)
             {
@@ -1778,7 +405,7 @@ namespace ServerFpsProjectZero.Networking
 
             // Update the player profile (now includes the refreshed LastLogin,
             // LoginStreak and any daily-login reward that was just granted).
-            UpdatePlayerProfile(player);
+            store.UpdatePlayerProfile(player);
 
             // Send success response
             SendLoginResponse(clientEndpoint, true, player.PlayerId, player.SessionToken, "Login successful");
@@ -1854,13 +481,13 @@ namespace ServerFpsProjectZero.Networking
                 return;
             }
 
-            if (UsernameExists(registerRequest.username))
+            if (store.UsernameExists(registerRequest.username))
             {
                 SendRegisterResponse(clientEndpoint, false, "Username already taken");
                 return;
             }
 
-            if (EmailExists(registerRequest.email))
+            if (store.EmailExists(registerRequest.email))
             {
                 SendRegisterResponse(clientEndpoint, false, "Email already registered");
                 return;
@@ -1869,7 +496,7 @@ namespace ServerFpsProjectZero.Networking
             string salt = GenerateSalt();
             string passwordHash = HashPassword(registerRequest.password, salt);
 
-            int playerId = CreateNewPlayer(registerRequest.username, registerRequest.email, passwordHash, salt);
+            int playerId = store.CreateNewPlayer(registerRequest.username, registerRequest.email, passwordHash, salt);
 
             if (playerId > 0)
             {
@@ -1965,9 +592,9 @@ namespace ServerFpsProjectZero.Networking
                 }
 
                 // Save to database
-                UpdatePlayerProfile(player);
-                UpdatePlayerInventory(player);
-                UpdatePlayerLoadout(player);
+                store.UpdatePlayerProfile(player);
+                store.UpdatePlayerInventory(player);
+                store.UpdatePlayerLoadout(player);
 
                 Console.WriteLine($"[LoginManager] {player.Username} updated stats - Kills: {player.Kills}, Deaths: {player.Deaths}");
             }
@@ -1997,9 +624,9 @@ namespace ServerFpsProjectZero.Networking
                 serverManager.RemoveClientConnection(client);
 
             // Save player data to database before disconnecting
-            UpdatePlayerProfile(player);
-            UpdatePlayerInventory(player);
-            UpdatePlayerLoadout(player);
+            store.UpdatePlayerProfile(player);
+            store.UpdatePlayerInventory(player);
+            store.UpdatePlayerLoadout(player);
 
             // Update player state
             player.IsConnected = false;
@@ -2280,10 +907,6 @@ namespace ServerFpsProjectZero.Networking
             return (playersNeeded / 2) * 30;
         }
 
-        private int CalculateExpToNextLevel(int level)
-        {
-            return 100 + (level * 50);
-        }
 
         private string GenerateSalt()
         {
@@ -2361,36 +984,6 @@ namespace ServerFpsProjectZero.Networking
         /// and a full profile write from the game-loop thread would race the packet handlers that
         /// also write the profile. This touches only the four columns it owns.
         /// </summary>
-        public void UpdatePlayerShards(Player player)
-        {
-            if (player == null) return;
-
-            try
-            {
-                using var connection = new SqliteConnection(connectionString);
-                connection.Open();
-                using var command = connection.CreateCommand();
-                command.CommandText = @"
-                    UPDATE Players SET
-                        CommonShards = @CommonShards,
-                        RareShards = @RareShards,
-                        EpicShards = @EpicShards,
-                        LegendaryShards = @LegendaryShards
-                    WHERE PlayerId = @PlayerId";
-                command.Parameters.AddWithValue("@CommonShards", player.CommonShards);
-                command.Parameters.AddWithValue("@RareShards", player.RareShards);
-                command.Parameters.AddWithValue("@EpicShards", player.EpicShards);
-                command.Parameters.AddWithValue("@LegendaryShards", player.LegendaryShards);
-                command.Parameters.AddWithValue("@PlayerId", player.PlayerId);
-                command.ExecuteNonQuery();
-            }
-            catch (SqliteException ex)
-            {
-                // A failed shard write must not take the run down; the in-memory balance is still
-                // correct, and the next logout writes the full profile.
-                Console.WriteLine($"[Database] Failed to persist shards for {player.Username}: {ex.Message}");
-            }
-        }
 
         public Player GetPlayerByToken(string token)
         {
@@ -2429,7 +1022,7 @@ namespace ServerFpsProjectZero.Networking
             }
 
             // Fall back to database
-            return GetPlayerProfileFromDbById(playerId);
+            return store.GetPlayerProfileFromDbById(playerId);
         }
 
         public void UpdatePlayerStatusForFriends(int playerId, PlayerStatus status)
@@ -2449,45 +1042,6 @@ namespace ServerFpsProjectZero.Networking
             Console.WriteLine($"\n[Matchmaking] Queue Size: {matchmakingQueue.QueueSize}/{MatchmakingQueue.PLAYERS_PER_GAME}");
         }
 
-        private void ApplyDailyLogin(Player player)
-        {
-            if (player == null) return;
-
-            DateTime now = DateTime.UtcNow;
-            DateTime last = player.LastLogin.Kind == DateTimeKind.Utc
-                ? player.LastLogin
-                : player.LastLogin.ToUniversalTime();
-
-            // Already logged in today: no new reward, just report the state so the
-            // client can reflect that today's reward is unavailable.
-            if (last != DateTime.MinValue && last.Date == now.Date)
-            {
-                player.DailyRewardClaimedToday = true;
-                player.DailyRewardGoldGranted = 0;
-                player.DailyRewardXpGranted = 0;
-                Console.WriteLine($"[LoginManager] Player '{player.Username}' already claimed today's login reward.");
-                return;
-            }
-
-            // The streak continues if the previous login was yesterday, otherwise it resets.
-            player.LoginStreak = (last != DateTime.MinValue && last.Date == now.Date.AddDays(-1))
-                ? player.LoginStreak + 1
-                : 1;
-
-            // Reward scales with the streak up to a modest cap.
-            int bonus = Math.Min(player.LoginStreak - 1, 6);
-            int gold = 100 + bonus * 25; // day1 = 100 gold, day7+ = 250 gold
-            int xp = 50 + bonus * 15;    // day1 = 50 XP,   day7+ = 140 XP
-
-            player.AddGold(gold);
-            player.AddExperience(xp); // AddExperience handles level-ups
-
-            player.DailyRewardClaimedToday = true;
-            player.DailyRewardGoldGranted = gold;
-            player.DailyRewardXpGranted = xp;
-
-            Console.WriteLine($"[LoginManager] Daily login reward for '{player.Username}': streak={player.LoginStreak}, +{gold} gold, +{xp} XP");
-        }
 
         #endregion
     }
