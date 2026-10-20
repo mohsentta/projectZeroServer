@@ -60,6 +60,13 @@ namespace ServerFpsProjectZero
             if (Array.Exists(args, a => string.Equals(a, "--no-shootdebug", StringComparison.OrdinalIgnoreCase)))
                 gameManager.ShootDebug = false;
 
+            int autoEndArg = Array.IndexOf(args, "--auto-end-game-seconds");
+            if (autoEndArg >= 0 && autoEndArg + 1 < args.Length &&
+                float.TryParse(args[autoEndArg + 1], out float autoEnd) && autoEnd > 0f)
+            {
+                gameManager.AutoEndAfterSeconds = autoEnd;
+            }
+
             // Packet trace is OFF by default (movement arrives at 20Hz and floods the console).
             //   --packettrace      log shoot packets
             //   --packettrace-all  log every packet type, movement included

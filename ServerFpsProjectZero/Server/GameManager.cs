@@ -27,6 +27,9 @@ namespace ServerFpsProjectZero.Server
         /// "shootdebug" console command to turn it off once shooting is trusted.
         /// </summary>
         public bool ShootDebug { get; set; } = true;
+
+        /// <summary>Test hook: end a game automatically after N seconds (0 = normal rules).</summary>
+        public float AutoEndAfterSeconds { get; set; }
         private Thread gameUpdateThread;
 
         // Configuration
@@ -267,6 +270,12 @@ namespace ServerFpsProjectZero.Server
 
                 var elapsed = (DateTime.UtcNow - game.StartTime).TotalSeconds;
                 game.TimeRemaining = GAME_DURATION - elapsed;
+
+                if (AutoEndAfterSeconds > 0f && elapsed >= AutoEndAfterSeconds)
+                {
+                    EndGame(game);
+                    continue;
+                }
 
                 // Co-op runs its own loop: there are no team scores to win with, so the run ends
                 // when the enemies finish the players rather than on the clock alone.
