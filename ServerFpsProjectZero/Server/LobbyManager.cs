@@ -265,7 +265,12 @@ namespace ServerFpsProjectZero.Server
         {
             if (players == null || players.Count == 0) return;
 
-            Lobby lobby = GetLobbyForPlayer(players[0].PlayerId);
+            Lobby lobby = null;
+            foreach (Player player in players)
+            {
+                lobby = GetLobbyForPlayer(player.PlayerId);
+                if (lobby != null) break;
+            }
             if (lobby == null) return;
 
             lock (lobby.Sync)
