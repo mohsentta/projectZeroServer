@@ -287,6 +287,7 @@ namespace ServerFpsProjectZero.Server
 
                     lobby.Status = "waiting";
                     lobby.Ready.Clear();
+                    lobby.StartedPlayerIds.Clear();
                 }
 
                 BroadcastLobbyUpdate(lobby, status: "waiting", message: "Match over — ready up again");
