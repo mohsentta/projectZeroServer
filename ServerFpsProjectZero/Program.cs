@@ -42,8 +42,15 @@ namespace ServerFpsProjectZero
             // Database connection string
             string connectionString = "Data Source=FPSGame.db;Mode=ReadWriteCreate;";
 
-            // Create server manager (single UDP port)
+            // Create server manager (single UDP port). --port lets tests run isolated
+            // without colliding with an already-running server.
             int serverPort = 7777;
+            int portArg = Array.IndexOf(args, "--port");
+            if (portArg >= 0 && portArg + 1 < args.Length &&
+                int.TryParse(args[portArg + 1], out int parsedPort) && parsedPort > 0)
+            {
+                serverPort = parsedPort;
+            }
             ServerManager serverManager = new ServerManager(serverPort);
 
             // Create managers
