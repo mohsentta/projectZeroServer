@@ -285,7 +285,7 @@ namespace ServerFpsProjectZero.Server
                     continue;
                 }
 
-                if (game.TimeRemaining <= 0 || game.RedScore >= 10 || game.BlueScore >= 10)
+                if (game.TimeRemaining <= 0 || game.RedScore >= 2 || game.BlueScore >= 2)
                 {
                     EndGame(game);
                     continue;
