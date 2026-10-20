@@ -2,6 +2,7 @@ using ProjectZero.Core;
 using ServerFpsProjectZero.Networking;
 using ServerFpsProjectZero.Server;
 using System;
+using System.Threading.Tasks;
 
 namespace ServerFpsProjectZero
 {
@@ -65,6 +66,15 @@ namespace ServerFpsProjectZero
                 float.TryParse(args[autoEndArg + 1], out float autoEnd) && autoEnd > 0f)
             {
                 gameManager.AutoEndAfterSeconds = autoEnd;
+            }
+
+            // Test hook used by the coverage runner; not used by the game.
+            int exitArg = Array.IndexOf(args, "--exit-after-seconds");
+            if (exitArg >= 0 && exitArg + 1 < args.Length &&
+                int.TryParse(args[exitArg + 1], out int exitAfter) && exitAfter > 0)
+            {
+                _ = Task.Delay(TimeSpan.FromSeconds(exitAfter))
+                    .ContinueWith(_ => Environment.Exit(0));
             }
 
             // Packet trace is OFF by default (movement arrives at 20Hz and floods the console).
