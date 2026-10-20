@@ -12,6 +12,9 @@ namespace ServerFpsProjectZero.Server
 {
     public class GameManager
     {
+        /// <summary>Fired when a match ends, so the lobby that started it can reopen.</summary>
+        public event Action<List<Player>> OnGameEnded;
+
         private ServerManager serverManager;
         private LoginManager loginManager;
         private ConcurrentDictionary<int, GameRoom> activeGames;
@@ -702,6 +705,12 @@ namespace ServerFpsProjectZero.Server
                 Console.WriteLine($"[GameManager] Game {game.GameId} ended for {player.Username}: {(isWinner ? "WINNER" : "LOSER")} - K/D: {stats.Kills}/{stats.Deaths}, Gold: +{goldReward}, XP: +{xpReward}");
             }
 
+            var participants = game.RedTeam.Concat(game.BlueTeam)
+                .Select(c => loginManager?.GetPlayerById(c.PlayerId))
+                .Where(p => p != null)
+                .ToList();
+            OnGameEnded?.Invoke(participants);
+
             activeGames.TryRemove(game.GameId, out _);
         }
 
@@ -1261,6 +1270,8 @@ namespace ServerFpsProjectZero.Server
 
                 var playerState = game.PlayerStates.ContainsKey(player.PlayerId) ?
                     game.PlayerStates[player.PlayerId] : new PlayerStateInfo();
+                var otherStats = game.PlayerStats.ContainsKey(player.PlayerId) ?
+                    game.PlayerStats[player.PlayerId] : new InGameStats();
 
                 others.Add(new OtherPlayerData
                 {
@@ -1272,7 +1283,11 @@ namespace ServerFpsProjectZero.Server
                     rotation = game.PlayerRotations.ContainsKey(player.PlayerId) ?
                                game.PlayerRotations[player.PlayerId] : new Vector2Data(),
                     health = playerState.health,
-                    isAlive = playerState.isAlive
+                    isAlive = playerState.isAlive,
+                    kills = otherStats.Kills,
+                    deaths = otherStats.Deaths,
+                    score = otherStats.Score,
+                    loadout = loginManager?.GetPlayerById(player.PlayerId)?.Loadout
                 });
             }
 

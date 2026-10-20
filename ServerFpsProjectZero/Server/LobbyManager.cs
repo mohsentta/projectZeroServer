@@ -244,21 +244,37 @@ namespace ServerFpsProjectZero.Server
                     }
                 }
 
-                lobby.Status = "starting";
+                lobby.Status = "in_game";
                 members = lobby.Members.ToList();
             }
 
-            // Remove the lobby before creating the game so players are no longer
-            // considered "in a lobby"; the match is authoritative from here on.
-            lobbies.TryRemove(lobby.LobbyId, out _);
-
             Console.WriteLine($"[Lobby] Lobby {lobby.LobbyId} starting ({members.Count} players)");
 
-            // Reuse the matchmaking authority path.
+            // Reuse the matchmaking authority path. Keep the lobby alive so the party can
+            // return to the same roster after the match instead of being dissolved.
             gameManager.CreateGame(members, lobby.GameType, Map.Office);
 
-            // Tell any remaining clients the lobby is closed.
-            BroadcastLobbyUpdate(lobby, status: "closed", message: "Game starting");
+            BroadcastLobbyUpdate(lobby, status: "in_game", message: "Game starting");
+        }
+
+        /// <summary>
+        /// Reopens the party after its match ends. The lobby was retained during the game so
+        /// the same roster/code is available when the post-game screen returns to the menu.
+        /// </summary>
+        public void OnGameEnded(List<Player> players)
+        {
+            if (players == null || players.Count == 0) return;
+
+            Lobby lobby = GetLobbyForPlayer(players[0].PlayerId);
+            if (lobby == null) return;
+
+            lock (lobby.Sync)
+            {
+                lobby.Status = "waiting";
+                lobby.Ready.Clear();
+            }
+
+            BroadcastLobbyUpdate(lobby, status: "waiting", message: "Match over — ready up again");
         }
 
         #endregion
@@ -597,7 +613,8 @@ namespace ServerFpsProjectZero.Server
                 {
                     playerId = m.PlayerId,
                     username = m.Username,
-                    ready = lobby.Ready.TryGetValue(m.PlayerId, out var r) && r
+                    ready = lobby.Ready.TryGetValue(m.PlayerId, out var r) && r,
+                    loadout = m.Loadout
                 }).ToList();
             }
 
@@ -654,8 +671,8 @@ namespace ServerFpsProjectZero.Server
 
     public class Lobby
     {
-        /// <summary>Team deathmatch is a duel.</summary>
-        public const int MaxPlayers = 2;
+        /// <summary>Team deathmatch is 5v5.</summary>
+        public const int MaxPlayers = 10;
 
         /// <summary>
         /// Co-op accepts a full squad, since the enemies scale with the players present and

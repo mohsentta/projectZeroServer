@@ -67,6 +67,7 @@ namespace ServerFpsProjectZero
             LoginManager loginManager = new LoginManager(serverManager, gameManager, connectionString);
             FriendsManager friendsManager = new FriendsManager(connectionString, serverManager, loginManager);
             LobbyManager lobbyManager = new LobbyManager(serverManager, gameManager);
+            gameManager.OnGameEnded += lobbyManager.OnGameEnded;
             lobbyManager.SetLoginManager(loginManager);
             lobbyManager.SetFriendsManager(friendsManager);
             gameManager.SetLoginManager(loginManager);

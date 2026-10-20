@@ -157,6 +157,10 @@ namespace ServerFpsProjectZero.Shared
         public Vector2Data rotation;
         public float health;
         public bool isAlive;
+        public int kills;
+        public int deaths;
+        public int score;
+        public PlayerLoadout loadout;
     }
 
     [Serializable]
@@ -774,6 +778,7 @@ namespace ServerFpsProjectZero.Shared
         public int playerId;
         public string username;
         public bool ready;
+        public PlayerLoadout loadout;
     }
 
     [Serializable]
@@ -790,7 +795,7 @@ namespace ServerFpsProjectZero.Shared
         public GameType gameType = GameType.TeamDeathmatch;
 
         /// <summary>How many players this mode accepts. Co-op takes more than a duel.</summary>
-        public int maxPlayers = 2;
+        public int maxPlayers = 10;
 
         public DateTime timestamp;
     }
