@@ -84,6 +84,7 @@ namespace ServerFpsProjectZero
             gameManager.OnGameEnded += lobbyManager.OnGameEnded;
             lobbyManager.SetLoginManager(loginManager);
             lobbyManager.SetFriendsManager(friendsManager);
+            loginManager.SetLobbyManager(lobbyManager);
             gameManager.SetLoginManager(loginManager);
 
             // Wire up friends-related packet handlers

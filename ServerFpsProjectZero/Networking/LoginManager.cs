@@ -38,6 +38,7 @@ namespace ServerFpsProjectZero.Networking
 
         // Matchmaking
         private MatchmakingQueue matchmakingQueue;
+        private LobbyManager lobbyManager;
 
         // Events
         public event Action<Player> OnPlayerLoggedIn;
@@ -600,9 +601,19 @@ namespace ServerFpsProjectZero.Networking
             }
         }
 
+        public void SetLobbyManager(LobbyManager manager)
+        {
+            lobbyManager = manager;
+        }
+
         private void DisconnectPlayer(Player player)
         {
             if (player == null) return;
+
+            // Explicit logout and a replaced session do not raise
+            // ServerManager.OnClientDisconnected (the removal there is intentionally
+            // event-free), so clean the lobby here as well as on heartbeat timeout.
+            lobbyManager?.OnPlayerDisconnected(player.PlayerId);
 
             friendsManager?.OnPlayerDisconnected(player.PlayerId);
 
