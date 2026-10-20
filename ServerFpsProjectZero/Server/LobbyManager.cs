@@ -246,6 +246,9 @@ namespace ServerFpsProjectZero.Server
 
                 lobby.Status = "in_game";
                 members = lobby.Members.ToList();
+                lobby.StartedPlayerIds.Clear();
+                foreach (Player member in members)
+                    lobby.StartedPlayerIds.Add(member.PlayerId);
             }
 
             Console.WriteLine($"[Lobby] Lobby {lobby.LobbyId} starting ({members.Count} players)");
@@ -265,21 +268,29 @@ namespace ServerFpsProjectZero.Server
         {
             if (players == null || players.Count == 0) return;
 
-            Lobby lobby = null;
+            // A match can contain several parties (matchmaking) and everyone in it is not
+            // necessarily in the same lobby. Restore each party to its own original roster;
+            // never turn the whole game roster into lobby members.
+            var restored = new HashSet<string>();
             foreach (Player player in players)
             {
-                lobby = GetLobbyForPlayer(player.PlayerId);
-                if (lobby != null) break;
-            }
-            if (lobby == null) return;
+                Lobby lobby = GetLobbyForPlayer(player.PlayerId);
+                if (lobby == null || !restored.Add(lobby.LobbyId))
+                    continue;
 
-            lock (lobby.Sync)
-            {
-                lobby.Status = "waiting";
-                lobby.Ready.Clear();
-            }
+                lock (lobby.Sync)
+                {
+                    if (lobby.StartedPlayerIds.Count > 0)
+                    {
+                        lobby.Members.RemoveAll(m => !lobby.StartedPlayerIds.Contains(m.PlayerId));
+                    }
 
-            BroadcastLobbyUpdate(lobby, status: "waiting", message: "Match over — ready up again");
+                    lobby.Status = "waiting";
+                    lobby.Ready.Clear();
+                }
+
+                BroadcastLobbyUpdate(lobby, status: "waiting", message: "Match over — ready up again");
+            }
         }
 
         #endregion
@@ -702,6 +713,10 @@ namespace ServerFpsProjectZero.Server
 
         public List<Player> Members { get; } = new List<Player>();
         public Dictionary<int, bool> Ready { get; } = new Dictionary<int, bool>();
+
+        /// <summary>Roster at the moment the party entered its match. Used to restore only
+        /// the players who actually queued together, never the matchmade opponents.</summary>
+        public HashSet<int> StartedPlayerIds { get; } = new HashSet<int>();
         public readonly object Sync = new object();
     }
 }
